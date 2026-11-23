@@ -11,22 +11,22 @@ type Lagu = 'tenang' | 'seru'
 type OpsiNada = { tipe?: OscillatorType; vol?: number; ke?: number; atk?: number }
 type OpsiDerau = { vol?: number; f?: number; q?: number; tipe?: BiquadFilterType }
 
-const AKOR = [48, 45, 41, 43] // C – Am – F – G
-const LAGU: Record<Lagu, { bpm: number; tipe: OscillatorType; vol: number; ekor: number; mel: number[][]; bas: number[] }> = {
+const AKOR = [55, 52, 48, 50] // G – Em – C – D (nada bas, suasana cerah)
+const LAGU: Record<Lagu, { bpm: number; tipe: OscillatorType; vol: number; ekor: number; mel: number[][]; bas: number[]; drum: 0 | 1 | 2 }> = {
   tenang: {
-    bpm: 92, tipe: 'triangle', vol: 0.11, ekor: 1.7, bas: [0, 4],
-    mel: [[72, 0, 76, 0, 79, 76, 0, 0], [69, 0, 72, 0, 76, 72, 0, 0], [65, 0, 69, 0, 72, 69, 0, 0], [67, 0, 71, 0, 74, 71, 67, 0]],
+    bpm: 88, tipe: 'sine', vol: 0.13, ekor: 2, bas: [0, 4], drum: 1,
+    mel: [[74, 0, 71, 0, 79, 74, 0, 0], [76, 0, 71, 0, 79, 76, 0, 71], [72, 0, 76, 0, 79, 76, 72, 0], [74, 0, 78, 0, 81, 78, 74, 0]],
   },
   seru: {
-    bpm: 136, tipe: 'square', vol: 0.045, ekor: 0.85, bas: [0, 2, 4, 6],
-    mel: [[72, 76, 79, 76, 84, 79, 76, 79], [69, 72, 76, 72, 81, 76, 72, 76], [65, 69, 72, 69, 77, 72, 69, 72], [67, 71, 74, 71, 79, 74, 71, 74]],
+    bpm: 148, tipe: 'sawtooth', vol: 0.032, ekor: 0.8, bas: [0, 3, 4, 7], drum: 2,
+    mel: [[79, 74, 79, 83, 79, 74, 71, 74], [76, 71, 76, 79, 76, 71, 67, 71], [72, 79, 76, 79, 72, 76, 79, 84], [74, 81, 78, 81, 74, 78, 81, 78]],
   },
 }
 const hz = (midi: number) => 440 * Math.pow(2, (midi - 69) / 12)
 
 const suara = (() => {
   let ctx: AudioContext | null = null
-  let sfx: GainNode, mus: GainNode, master: GainNode
+  let sfx: GainNode, mus: GainNode, master: GainNode, gema: GainNode
   let derau: AudioBuffer
   let mati = false
   try { mati = localStorage.getItem('suara-mati') === '1' } catch { /* penyimpanan tidak tersedia */ }
@@ -40,6 +40,23 @@ const suara = (() => {
       master = ctx.createGain(); master.gain.value = mati ? 0 : 1; master.connect(ctx.destination)
       sfx = ctx.createGain(); sfx.gain.value = 0.7; sfx.connect(master)
       mus = ctx.createGain(); mus.gain.value = 0.5; mus.connect(master)
+      /* gema ruangan (reverb): impuls dibuat dari derau yang meluruh → efek & musik terdengar lebih "hidup" */
+      const len = Math.floor(ctx.sampleRate * 1.4)
+      const imp = ctx.createBuffer(2, len, ctx.sampleRate)
+      for (let c = 0; c < 2; c++) {
+        const d = imp.getChannelData(c)
+        for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.6)
+      }
+      const rv = ctx.createConvolver(); rv.buffer = imp
+      gema = ctx.createGain(); gema.gain.value = 0.32
+      gema.connect(rv); rv.connect(master)
+      sfx.connect(gema)
+      /* gema berulang (delay) khusus musik */
+      const dl = ctx.createDelay(1); dl.delayTime.value = 0.34
+      const fb = ctx.createGain(); fb.gain.value = 0.28
+      const dw = ctx.createGain(); dw.gain.value = 0.22
+      mus.connect(dl); dl.connect(fb); fb.connect(dl); dl.connect(dw); dw.connect(master)
+      mus.connect(gema)
       derau = ctx.createBuffer(1, Math.floor(ctx.sampleRate * 0.5), ctx.sampleRate)
       const d = derau.getChannelData(0)
       for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1
@@ -63,7 +80,7 @@ const suara = (() => {
     osc.start(t); osc.stop(t + dur + 0.03)
   }
 
-  const desir = (t: number, dur: number, o: OpsiDerau = {}) => {
+  const desir = (t: number, dur: number, o: OpsiDerau = {}, tujuan?: GainNode) => {
     if (!ctx) return
     const { vol = 0.2, f = 800, q = 0.7, tipe = 'lowpass' } = o
     const s = ctx.createBufferSource()
@@ -73,7 +90,7 @@ const suara = (() => {
     fl.type = tipe; fl.frequency.value = f; fl.Q.value = q
     g.gain.setValueAtTime(vol, t)
     g.gain.exponentialRampToValueAtTime(0.0001, t + dur)
-    s.connect(fl); fl.connect(g); g.connect(sfx)
+    s.connect(fl); fl.connect(g); g.connect(tujuan ?? sfx)
     s.start(t); s.stop(t + Math.min(dur, 0.45) + 0.03)
   }
 
@@ -81,29 +98,29 @@ const suara = (() => {
     notes.forEach((f, i) => nada(f, t + i * jarak, dur, o))
 
   const efek: Record<Bunyi, (t: number) => void> = {
-    klik: (t) => nada(620, t, 0.07, { tipe: 'triangle', vol: 0.22, ke: 900 }),
-    loncat: (t) => { nada(300, t, 0.18, { vol: 0.28, ke: 720 }); nada(450, t, 0.12, { tipe: 'triangle', vol: 0.07, ke: 950 }) },
-    mendarat: (t) => { desir(t, 0.07, { vol: 0.25, f: 500 }); nada(140, t, 0.09, { vol: 0.28, ke: 70 }) },
-    langkah: (t) => desir(t, 0.035, { vol: 0.06, f: 1400, q: 1.2, tipe: 'bandpass' }),
-    koin: (t) => { nada(988, t, 0.09, { tipe: 'square', vol: 0.09 }); nada(1319, t + 0.07, 0.28, { tipe: 'square', vol: 0.09 }) },
-    bentuk: (t) => { urut([523, 659, 784, 1047], t, 0.07, 0.22, { tipe: 'triangle', vol: 0.22 }); nada(2093, t + 0.28, 0.35, { vol: 0.06 }) },
-    injak: (t) => { nada(520, t, 0.2, { vol: 0.33, ke: 110 }); desir(t, 0.1, { vol: 0.28, f: 900 }); nada(200, t + 0.08, 0.15, { tipe: 'triangle', vol: 0.14, ke: 420 }) },
-    kena: (t) => { nada(380, t, 0.35, { tipe: 'sawtooth', vol: 0.16, ke: 90 }); desir(t, 0.18, { vol: 0.28, f: 700 }) },
-    terkunci: (t) => { nada(190, t, 0.1, { tipe: 'square', vol: 0.1 }); nada(150, t + 0.11, 0.16, { tipe: 'square', vol: 0.1 }) },
+    klik: (t) => nada(740, t, 0.06, { tipe: 'sine', vol: 0.2, ke: 1100 }),
+    loncat: (t) => { nada(260, t, 0.2, { tipe: 'triangle', vol: 0.3, ke: 680 }); nada(520, t + 0.02, 0.14, { vol: 0.08, ke: 1040 }) },
+    mendarat: (t) => { desir(t, 0.06, { vol: 0.22, f: 420 }); nada(120, t, 0.1, { vol: 0.3, ke: 60 }) },
+    langkah: (t) => desir(t, 0.03, { vol: 0.05, f: 1700, q: 1.4, tipe: 'bandpass' }),
+    koin: (t) => { nada(1175, t, 0.07, { tipe: 'triangle', vol: 0.14 }); nada(1568, t + 0.06, 0.3, { tipe: 'triangle', vol: 0.14 }); nada(2349, t + 0.06, 0.2, { vol: 0.04 }); nada(3136, t + 0.1, 0.25, { vol: 0.025 }) },
+    bentuk: (t) => { urut([587, 740, 880, 1175], t, 0.07, 0.24, { tipe: 'sine', vol: 0.24 }); nada(2349, t + 0.3, 0.4, { vol: 0.06 }) },
+    injak: (t) => { nada(480, t, 0.18, { tipe: 'square', vol: 0.2, ke: 120 }); desir(t, 0.09, { vol: 0.25, f: 800 }); nada(240, t + 0.07, 0.14, { tipe: 'triangle', vol: 0.14, ke: 480 }) },
+    kena: (t) => { nada(330, t, 0.35, { tipe: 'sawtooth', vol: 0.15, ke: 80 }); desir(t, 0.2, { vol: 0.26, f: 650 }) },
+    terkunci: (t) => { nada(210, t, 0.09, { tipe: 'square', vol: 0.09 }); nada(165, t + 0.1, 0.16, { tipe: 'square', vol: 0.09 }) },
     gerbangBuka: (t) => {
-      urut([392, 523, 659, 784, 1047], t, 0.08, 0.3, { tipe: 'triangle', vol: 0.2 })
-      nada(1568, t + 0.4, 0.5, { vol: 0.07 }); desir(t, 0.3, { vol: 0.07, f: 3000, tipe: 'highpass' })
+      urut([440, 554, 659, 880, 1109], t, 0.08, 0.3, { tipe: 'sine', vol: 0.2 })
+      nada(1760, t + 0.42, 0.5, { vol: 0.07 }); desir(t, 0.3, { vol: 0.06, f: 3200, tipe: 'highpass' })
     },
-    masuk: (t) => { nada(260, t, 0.55, { vol: 0.26, ke: 1300 }); nada(520, t + 0.05, 0.5, { tipe: 'triangle', vol: 0.12, ke: 2000 }) },
-    mulai: (t) => urut([392, 523, 784], t, 0.1, 0.2, { tipe: 'triangle', vol: 0.2 }),
-    benar: (t) => { urut([784, 1047, 1319], t, 0.1, 0.18, { tipe: 'triangle', vol: 0.24 }); urut([523, 659, 784], t + 0.3, 0, 0.5, { tipe: 'sine', vol: 0.1 }) },
-    salah: (t) => { nada(311, t, 0.22, { tipe: 'sawtooth', vol: 0.12, ke: 290 }); nada(233, t + 0.22, 0.4, { tipe: 'sawtooth', vol: 0.12, ke: 190 }) },
+    masuk: (t) => { nada(300, t, 0.55, { tipe: 'triangle', vol: 0.24, ke: 1500 }); nada(600, t + 0.05, 0.5, { vol: 0.1, ke: 2200 }) },
+    mulai: (t) => urut([440, 587, 880], t, 0.1, 0.2, { tipe: 'sine', vol: 0.2 }),
+    benar: (t) => { urut([659, 880, 1175], t, 0.1, 0.2, { tipe: 'triangle', vol: 0.24 }); urut([392, 494, 587], t + 0.3, 0, 0.5, { tipe: 'sine', vol: 0.1 }); urut([1760, 2349, 2960, 3520], t + 0.12, 0.07, 0.3, { vol: 0.03 }); desir(t + 0.3, 0.25, { vol: 0.05, f: 5000, tipe: 'highpass' }) },
+    salah: (t) => { nada(294, t, 0.24, { tipe: 'triangle', vol: 0.18, ke: 270 }); nada(220, t + 0.24, 0.42, { tipe: 'triangle', vol: 0.18, ke: 180 }) },
     menang: (t) => {
-      urut([523, 523, 523, 659, 784], t, 0.12, 0.16, { tipe: 'triangle', vol: 0.22 })
-      nada(1047, t + 0.62, 0.7, { tipe: 'triangle', vol: 0.24 }); nada(784, t + 0.62, 0.7, { tipe: 'sine', vol: 0.12 }); nada(659, t + 0.62, 0.7, { tipe: 'sine', vol: 0.1 })
+      urut([587, 587, 587, 740, 880], t, 0.12, 0.16, { tipe: 'triangle', vol: 0.22 })
+      nada(1175, t + 0.62, 0.7, { tipe: 'triangle', vol: 0.24 }); nada(880, t + 0.62, 0.7, { tipe: 'sine', vol: 0.12 }); nada(740, t + 0.62, 0.7, { tipe: 'sine', vol: 0.1 })
     },
-    kalah: (t) => urut([392, 349, 311, 262], t, 0.2, 0.34, { tipe: 'triangle', vol: 0.2 }),
-    boing: (t) => { nada(200, t, 0.14, { vol: 0.3, ke: 560 }); nada(560, t + 0.14, 0.26, { vol: 0.26, ke: 240 }) },
+    kalah: (t) => urut([440, 392, 330, 294], t, 0.2, 0.34, { tipe: 'sine', vol: 0.22 }),
+    boing: (t) => { nada(220, t, 0.14, { vol: 0.3, ke: 620 }); nada(620, t + 0.14, 0.26, { vol: 0.26, ke: 260 }) },
   }
 
   /* ---------- musik latar: penjadwal "lookahead" ---------- */
@@ -122,6 +139,14 @@ const suara = (() => {
       const m = L.mel[bar][s]
       if (m) nada(hz(m), next, dur * L.ekor, { tipe: L.tipe, vol: L.vol }, mus)
       if (L.bas.includes(s)) nada(hz(AKOR[bar]), next, dur * 1.8, { vol: L.vol * 1.5 }, mus)
+      if (L.drum === 2) {
+        if (s === 0 || s === 4) nada(160, next, 0.14, { vol: 0.2, ke: 45, atk: 0.002 }, mus) // tung
+        if (s === 2 || s === 6) desir(next, 0.09, { vol: 0.07, f: 1800, q: 0.8, tipe: 'bandpass' }, mus) // tak
+        if (s % 2) desir(next, 0.03, { vol: 0.03, f: 7000, tipe: 'highpass' }, mus) // cis
+      } else if (L.drum === 1 && (s === 2 || s === 6)) {
+        desir(next, 0.05, { vol: 0.025, f: 6000, q: 0.8, tipe: 'highpass' }, mus) // kocokan lembut
+      }
+      if (L.drum === 1 && s === 0 && bar % 2 === 0) nada(hz(AKOR[bar]) * 4, next, dur * 3, { vol: L.vol * 0.35 }, mus) // denting lonceng
       next += dur
       step++
     }
@@ -154,7 +179,7 @@ const suara = (() => {
       const c = buka()
       if (!c) return
       const t = c.currentTime + 0.005 + tunda
-      const f = [523, 587, 659, 784, 880][i % 5]
+      const f = [587, 659, 740, 880, 988][i % 5]
       nada(f, t, 0.32, { tipe: 'triangle', vol: 0.24 }); nada(f * 2, t, 0.2, { vol: 0.07 }); desir(t, 0.06, { vol: 0.08, f: 4000, tipe: 'highpass' })
     },
     musik: (l: Lagu | null) => {
@@ -182,7 +207,7 @@ const gaya = `
 * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
 html, body, #root { height: 100%; }
 body {
-  background: radial-gradient(circle at 50% 30%, #3b4a6b, #151c2e);
+  background: radial-gradient(circle at 50% 30%, #4a3b6b, #1e152e);
   font-family: 'Fredoka', system-ui, sans-serif;
   display: block; place-items: initial;
   -webkit-font-smoothing: antialiased;
@@ -197,9 +222,9 @@ body {
   margin: 0 auto;
   overflow: hidden;
   container-type: inline-size;
-  color: #17306b;
+  color: #33176b;
   user-select: none;
-  background: #5db4ee;
+  background: #625dee;
 }
 .layar button { font-family: inherit; border: 0; cursor: pointer; }
 .layar > * { position: absolute; }
@@ -212,9 +237,9 @@ body {
    Tanpa ini profil, bintang, berlian, dan pengaturan tertimpa latar SVG (tidak terlihat). */
 .profil, .mata-uang, .pengaturan { position: absolute; z-index: 5; }
 .panel-gelap {
-  background: linear-gradient(#1b4a94, #0f3170);
-  box-shadow: 0 0.5cqw 0 #081f4a, inset 0 0.25cqw 0 rgba(255,255,255,.18), 0 1.2cqw 2cqw rgba(8,30,70,.3);
-  border: 0.375cqw solid #0b2a60;
+  background: linear-gradient(#391b94, #2a0f70);
+  box-shadow: 0 0.5cqw 0 #1b084a, inset 0 0.25cqw 0 rgba(255,255,255,.18), 0 1.2cqw 2cqw rgba(25,8,70,.3);
+  border: 0.375cqw solid #220b60;
 }
 .profil {
   left: 4cqw; top: 4.25cqw; width: 36.75cqw; height: 12.5cqw;
@@ -223,9 +248,9 @@ body {
 }
 .avatar { width: 10.25cqw; height: 10.25cqw; border-radius: 50%; border: 0.7cqw solid #fff; flex: none; box-shadow: 0 0.4cqw 0.8cqw rgba(0,0,0,.3); }
 .profil-info { flex: 1; line-height: 1.05; }
-.profil-info small { display: block; font-size: 2.25cqw; font-weight: 500; color: #8fd8e8; }
+.profil-info small { display: block; font-size: 2.25cqw; font-weight: 500; color: #8fa0e8; }
 .profil-info strong { display: block; font-size: 3.5cqw; font-weight: 700; letter-spacing: .1cqw; }
-.xp { height: 1.9cqw; margin: 0.6cqw 0 0.5cqw; background: #08224f; border-radius: 1.5cqw; overflow: hidden; box-shadow: inset 0 0.25cqw 0.4cqw rgba(0,0,0,.45); }
+.xp { height: 1.9cqw; margin: 0.6cqw 0 0.5cqw; background: #1b084f; border-radius: 1.5cqw; overflow: hidden; box-shadow: inset 0 0.25cqw 0.4cqw rgba(0,0,0,.45); }
 .xp span { display: block; height: 100%; background: linear-gradient(#a6f27a, #54c93a); border-radius: 1.5cqw; }
  
 .mata-uang {
@@ -257,18 +282,18 @@ body {
 .misi {
   left: 60.5cqw; top: 15.5cqw; width: 35.25cqw; height: 14cqw;
   display: flex; align-items: center; gap: 1.5cqw; padding: 0 1.5cqw 0 2cqw;
-  background: linear-gradient(#ffffff, #eef5fc); border-radius: 3.5cqw; text-align: left;
-  color: #17306b;
-  box-shadow: 0 0.5cqw 0 rgba(120,160,205,.55), 0 1.5cqw 3cqw rgba(20,60,120,.18);
+  background: linear-gradient(#ffffff, #f0eefc); border-radius: 3.5cqw; text-align: left;
+  color: #33176b;
+  box-shadow: 0 0.5cqw 0 rgba(134,120,205,.55), 0 1.5cqw 3cqw rgba(43,20,120,.18);
 }
 .misi-ikon { width: 5.5cqw; flex: none; }
 .misi-teks { flex: 1; line-height: 1.15; }
 .misi-teks b { display: block; font-size: 2.6cqw; font-weight: 600; }
-.misi-teks span { display: block; font-size: 2.05cqw; font-weight: 400; color: #4a5f86; margin-top: 0.3cqw; }
+.misi-teks span { display: block; font-size: 2.05cqw; font-weight: 400; color: #5b4a86; margin-top: 0.3cqw; }
 .misi-progres { display: flex; align-items: center; gap: 1.25cqw; margin-top: 1.1cqw; }
-.misi-progres .bar { flex: 1; height: 1.7cqw; background: #d4e2f3; border-radius: 1.5cqw; overflow: hidden; }
+.misi-progres .bar { flex: 1; height: 1.7cqw; background: #dad4f3; border-radius: 1.5cqw; overflow: hidden; }
 .misi-progres i { display: block; height: 100%; background: linear-gradient(#a6f27a, #54c93a); border-radius: 1.5cqw; }
-.misi-progres em { font-style: normal; font-size: 2cqw; color: #4a5f86; }
+.misi-progres em { font-style: normal; font-size: 2cqw; color: #5b4a86; }
 .panah { width: 2.5cqw; height: 3.5cqw; flex: none; }
  
 /* ---------- logo ---------- */
@@ -285,7 +310,7 @@ body {
   border: 0.75cqw solid #f29a12 !important;
   border-radius: 7.5cqw;
   box-shadow: 0 1.1cqw 0 #c27006, inset 0 0.5cqw 0 rgba(255,255,255,.55), 0 2.5cqw 3cqw rgba(0,0,0,.2);
-  color: #14306e; font-size: 5.1cqw; font-weight: 700;
+  color: #31146e; font-size: 5.1cqw; font-weight: 700;
   transition: transform .12s, box-shadow .12s;
 }
 .tombol:active { transform: translateY(0.9cqw); box-shadow: 0 0.2cqw 0 #c27006, inset 0 0.5cqw 0 rgba(255,255,255,.55); }
@@ -348,18 +373,18 @@ body {
   left: 4.75cqw; top: 158.6cqw; width: 90.5cqw; height: 23cqw;
   display: flex; justify-content: space-around; align-items: flex-start;
   padding: 2.5cqw 1.5cqw 0;
-  background: linear-gradient(#f9fbfe, #eaf1f9);
+  background: linear-gradient(#faf9fe, #eceaf9);
   border-radius: 7cqw 7cqw 0 0;
   box-shadow: 0 -0.6cqw 3cqw rgba(0,0,0,.14), inset 0 0.3cqw 0 #fff;
 }
 .navigasi button {
   width: 16.5cqw; height: 12.5cqw; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.5cqw;
-  background: transparent; color: #3b5ea0; border-radius: 4cqw; padding: 0;
+  background: transparent; color: #583ba0; border-radius: 4cqw; padding: 0;
   font-size: 2.6cqw; font-weight: 500;
 }
 .navigasi button svg { width: 7cqw; height: 7cqw; }
-.navigasi button.aktif { background: #cfe3fa; color: #1b5cc2; font-weight: 600; }
-.navigasi button:focus-visible { outline: 0.5cqw solid #1d5fc4; }
+.navigasi button.aktif { background: #d6cffa; color: #441bc2; font-weight: 600; }
+.navigasi button:focus-visible { outline: 0.5cqw solid #451dc4; }
  
 @media (prefers-reduced-motion: reduce) {
   .tombol { transition: none; }
@@ -374,7 +399,7 @@ function Tombol({ children = 'Mulai Petualangan', onClick }: TombolProps) {
   return (
     <button className="tombol" onClick={onClick}>
       <svg className="tombol-ikon" viewBox="0 0 48 48" aria-hidden="true">
-        <path d="M11 5 L42 24 L11 43 Z" fill="#fff" stroke="#14306e" strokeWidth="4.5" strokeLinejoin="round" />
+        <path d="M11 5 L42 24 L11 43 Z" fill="#fff" stroke="#31146e" strokeWidth="4.5" strokeLinejoin="round" />
       </svg>
       <span>{children}</span>
     </button>
@@ -397,8 +422,8 @@ function Logo() {
             <stop offset="1" stopColor="#f5a80d" />
           </linearGradient>
           <linearGradient id="biruBentuk" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0" stopColor="#4cb4ff" />
-            <stop offset="1" stopColor="#1769d6" />
+            <stop offset="0" stopColor="#554cff" />
+            <stop offset="1" stopColor="#3e17d6" />
           </linearGradient>
           <radialGradient id="merahBentuk" cx=".35" cy=".3" r=".8">
             <stop offset="0" stopColor="#ff7d86" />
@@ -421,7 +446,7 @@ function Logo() {
         <circle cx="214" cy="72" r="33" fill="url(#merahBentuk)" />
         <ellipse cx="202" cy="56" rx="11" ry="6" fill="#fff" opacity=".35" transform="rotate(-25 202 56)" />
         <g transform="rotate(8 275 62)">
-          <rect x="246" y="38" width="58" height="48" rx="7" fill="url(#biruBentuk)" stroke="#0f3f93" strokeWidth="3.5" />
+          <rect x="246" y="38" width="58" height="48" rx="7" fill="url(#biruBentuk)" stroke="#330f93" strokeWidth="3.5" />
           <rect x="250" y="42" width="50" height="8" rx="4" fill="#fff" opacity=".35" />
         </g>
         <path d="M118 90 L148 40 L178 90Z" fill="url(#kuningBentuk)" stroke="#f0a30c" strokeWidth="8" strokeLinejoin="round" />
@@ -439,22 +464,22 @@ function Logo() {
         {/* "Petualangan" */}
         <g transform="rotate(2.5 200 100)">
           <text x="200" y="124" textAnchor="middle" fontSize="42" textLength="236" lengthAdjust="spacingAndGlyphs"
-            fill="#071a45" stroke="#071a45" strokeWidth="13" strokeLinejoin="round" transform="translate(0 4)">Petualangan</text>
+            fill="#1b0745" stroke="#1b0745" strokeWidth="13" strokeLinejoin="round" transform="translate(0 4)">Petualangan</text>
           <text x="200" y="124" textAnchor="middle" fontSize="42" textLength="236" lengthAdjust="spacingAndGlyphs"
-            fill="#fff" stroke="#14306e" strokeWidth="9" strokeLinejoin="round" paintOrder="stroke fill">Petualangan</text>
+            fill="#fff" stroke="#31146e" strokeWidth="9" strokeLinejoin="round" paintOrder="stroke fill">Petualangan</text>
         </g>
  
         {/* "Bangun Datar" */}
         <g transform="rotate(2.5 200 150)">
           <text x="200" y="170" textAnchor="middle" fontSize="54" textLength="290" lengthAdjust="spacingAndGlyphs"
-            fill="#071a45" stroke="#071a45" strokeWidth="14" strokeLinejoin="round" transform="translate(0 5)">Bangun Datar</text>
+            fill="#1b0745" stroke="#1b0745" strokeWidth="14" strokeLinejoin="round" transform="translate(0 5)">Bangun Datar</text>
           <text x="200" y="170" textAnchor="middle" fontSize="54" textLength="290" lengthAdjust="spacingAndGlyphs"
-            fill="url(#kuningJudul)" stroke="#14306e" strokeWidth="10" strokeLinejoin="round" paintOrder="stroke fill">Bangun Datar</text>
+            fill="url(#kuningJudul)" stroke="#31146e" strokeWidth="10" strokeLinejoin="round" paintOrder="stroke fill">Bangun Datar</text>
         </g>
  
         {/* pita slogan */}
-        <path d="M91 186 Q205 160 314 182 L306 204 Q205 186 100 206Z" fill="#0d2a66" transform="translate(0 3)" />
-        <path d="M91 186 Q205 160 314 182 L306 204 Q205 186 100 206Z" fill="#1b4aa8" stroke="#0f2a63" strokeWidth="2" strokeLinejoin="round" />
+        <path d="M91 186 Q205 160 314 182 L306 204 Q205 186 100 206Z" fill="#280d66" transform="translate(0 3)" />
+        <path d="M91 186 Q205 160 314 182 L306 204 Q205 186 100 206Z" fill="#451ba8" stroke="#290f63" strokeWidth="2" strokeLinejoin="round" />
         <text fontSize="13.5" fontWeight="600" fill="#fff" style={{ fontWeight: 600 }}>
           <textPath href="#lengkung" startOffset="50%" textAnchor="middle">Jelajahi Dunia, Temukan Bentuknya!</textPath>
         </text>
@@ -469,21 +494,21 @@ function Latar() {
     <svg className="latar" viewBox="0 0 400 711" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
       <defs>
         <linearGradient id="langit" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0" stopColor="#1f86e6" />
-          <stop offset=".5" stopColor="#74bff2" />
-          <stop offset="1" stopColor="#d6f0ff" />
+          <stop offset="0" stopColor="#361fe6" />
+          <stop offset=".5" stopColor="#7974f2" />
+          <stop offset="1" stopColor="#d6d6ff" />
         </linearGradient>
         <linearGradient id="rumput" x1="0" y1="0" x2="0" y2="1">
           <stop offset="0" stopColor="#8be04f" />
           <stop offset="1" stopColor="#3b9a35" />
         </linearGradient>
         <linearGradient id="tebing" x1="0" y1="0" x2="1" y2="0">
-          <stop offset="0" stopColor="#8a97a8" />
-          <stop offset="1" stopColor="#b7c0c9" />
+          <stop offset="0" stopColor="#908aa8" />
+          <stop offset="1" stopColor="#b9b7c9" />
         </linearGradient>
         <linearGradient id="sungai" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0" stopColor="#58c8f4" />
-          <stop offset="1" stopColor="#1f93d8" />
+          <stop offset="0" stopColor="#5865f4" />
+          <stop offset="1" stopColor="#201fd8" />
         </linearGradient>
         <linearGradient id="jalan" x1="0" y1="0" x2="0" y2="1">
           <stop offset="0" stopColor="#f0cb86" />
@@ -501,7 +526,7 @@ function Latar() {
       <rect width="400" height="711" fill="url(#langit)" />
  
       {/* awan (bayangan + isi) */}
-      <g fill="#cfe6f8" opacity=".9">
+      <g fill="#d2cff8" opacity=".9">
         <use href="#awan" transform="translate(-14 128) scale(1.35)" />
         <use href="#awan" transform="translate(318 168) scale(.8)" />
       </g>
@@ -515,10 +540,10 @@ function Latar() {
       </g>
  
       {/* gunung jauh */}
-      <path d="M0 380 L48 298 L92 362 L132 328 L176 404 L196 436 V480 H0Z" fill="#86afd0" />
-      <path d="M48 298 L66 326 L50 340 L34 330Z" fill="#b8d3e8" />
-      <path d="M190 446 L248 372 L284 408 L322 352 L364 408 L400 380 V480 H190Z" fill="#9cc3de" />
-      <path d="M322 352 L338 376 L324 386 L308 376Z" fill="#c4dcec" />
+      <path d="M0 380 L48 298 L92 362 L132 328 L176 404 L196 436 V480 H0Z" fill="#8c86d0" />
+      <path d="M48 298 L66 326 L50 340 L34 330Z" fill="#bbb8e8" />
+      <path d="M190 446 L248 372 L284 408 L322 352 L364 408 L400 380 V480 H190Z" fill="#9f9cde" />
+      <path d="M322 352 L338 376 L324 386 L308 376Z" fill="#c5c4ec" />
       <path d="M0 440 Q100 410 200 440 T400 430 V480 H0Z" fill="#b9dcc4" opacity=".6" />
  
       {/* tebing kiri */}
@@ -557,10 +582,10 @@ function Latar() {
  
       {/* sungai */}
       <path d="M228 490 Q264 498 252 532 Q246 562 284 594 L338 604 Q268 562 282 526 Q294 492 254 482Z" fill="url(#sungai)" />
-      <path d="M240 520 q20 4 30 -6 M262 566 q14 6 26 -2" stroke="#c9f0ff" strokeWidth="2" strokeLinecap="round" fill="none" />
+      <path d="M240 520 q20 4 30 -6 M262 566 q14 6 26 -2" stroke="#c9ceff" strokeWidth="2" strokeLinecap="round" fill="none" />
       <path d="M246 506 H292 V521 H252Z" fill="#938878" /><path d="M246 506 H292 V510 H246Z" fill="#b3a898" />
       <path d="M262 536 H324 V554 H268Z" fill="#a49887" /><path d="M262 536 H324 V540 H262Z" fill="#c4b9a8" />
-      <path d="M250 540 H262 V548 H252Z" fill="#7fc9ee" />
+      <path d="M250 540 H262 V548 H252Z" fill="#7f83ee" />
  
       {/* jalan setapak */}
       <path d="M112 711 Q154 622 102 572 Q72 546 20 530 L0 520 V711Z" fill="url(#jalan)" />
@@ -638,14 +663,14 @@ function Maskot() {
           <stop offset="0" stopColor="#ffe55c" /><stop offset="1" stopColor="#f7b80f" />
         </linearGradient>
         <linearGradient id="ransel" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0" stopColor="#2f72dc" /><stop offset="1" stopColor="#1646a0" />
+          <stop offset="0" stopColor="#5a2fdc" /><stop offset="1" stopColor="#3d16a0" />
         </linearGradient>
       </defs>
       {/* ransel */}
       <g className="ransel-ayun"><g transform="rotate(-12 30 100)">
-        <rect x="6" y="64" width="48" height="70" rx="15" fill="url(#ransel)" stroke="#12378a" strokeWidth="2.5" />
-        <rect x="12" y="98" width="30" height="24" rx="7" fill="#2d6ad6" stroke="#12378a" strokeWidth="2" />
-        <rect x="14" y="70" width="26" height="6" rx="3" fill="#6aa4f5" opacity=".6" />
+        <rect x="6" y="64" width="48" height="70" rx="15" fill="url(#ransel)" stroke="#39128a" strokeWidth="2.5" />
+        <rect x="12" y="98" width="30" height="24" rx="7" fill="#5b2dd6" stroke="#39128a" strokeWidth="2" />
+        <rect x="14" y="70" width="26" height="6" rx="3" fill="#886af5" opacity=".6" />
         <circle cx="26" cy="90" r="4.5" fill="#f4c542" stroke="#b88a10" strokeWidth="1.5" />
       </g></g>
       {/* kaki */}
@@ -659,8 +684,8 @@ function Maskot() {
       <path d="M86 10 L18 158 L78 158 Z" fill="#e8a400" opacity=".35" />
       <path d="M86 18 L34 134" stroke="#fff6b5" strokeWidth="6" strokeLinecap="round" opacity=".75" />
       {/* tali ransel */}
-      <path d="M32 106 Q60 98 68 132" stroke="#1f56b8" strokeWidth="9" strokeLinecap="round" fill="none" />
-      <path d="M32 106 Q60 98 68 132" stroke="#12378a" strokeWidth="1.5" strokeLinecap="round" fill="none" opacity=".6" />
+      <path d="M32 106 Q60 98 68 132" stroke="#491fb8" strokeWidth="9" strokeLinecap="round" fill="none" />
+      <path d="M32 106 Q60 98 68 132" stroke="#39128a" strokeWidth="1.5" strokeLinecap="round" fill="none" opacity=".6" />
       {/* wajah */}
       <g className="mata-kedip">
         <ellipse cx="90" cy="100" rx="14" ry="18" fill="#fff" stroke="#2a2a2a" strokeWidth="2" />
@@ -712,7 +737,7 @@ function Musuh() {
           <stop offset="0" stopColor="#ff7a86" /><stop offset="1" stopColor="#d02640" />
         </radialGradient>
         <linearGradient id="kubusBiru" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0" stopColor="#47b2ff" /><stop offset="1" stopColor="#1c78de" />
+          <stop offset="0" stopColor="#5147ff" /><stop offset="1" stopColor="#3b1cde" />
         </linearGradient>
         <linearGradient id="limasUngu" x1="0" y1="0" x2="1" y2="1">
           <stop offset="0" stopColor="#9b78f0" /><stop offset="1" stopColor="#6038c8" />
@@ -722,9 +747,9 @@ function Musuh() {
       <ellipse cx="17" cy="15" rx="9" ry="5" fill="#fff" opacity=".4" transform="rotate(-25 17 15)" />
       <MataMarah cx={27} cy={30} />
  
-      <rect x="55" y="8" width="48" height="45" rx="6" fill="#1560c4" />
+      <rect x="55" y="8" width="48" height="45" rx="6" fill="#3915c4" />
       <rect x="55" y="5" width="48" height="44" rx="6" fill="url(#kubusBiru)" />
-      <path d="M61 5 H97 Q103 5 103 11 V13 H55 V11 Q55 5 61 5Z" fill="#7cc8ff" opacity=".8" />
+      <path d="M61 5 H97 Q103 5 103 11 V13 H55 V11 Q55 5 61 5Z" fill="#837cff" opacity=".8" />
       <MataMarah cx={79} cy={30} />
  
       <path d="M127 7 L104 50 H150 Z" fill="url(#limasUngu)" stroke="#6a44d4" strokeWidth="6" strokeLinejoin="round" />
@@ -751,18 +776,18 @@ const m = (l: number, t: number, w?: number, h?: number) => a(l * 0.2024, t * 0.
  
 const gayaPeta = `
 .pg { inset: 0; width: 100%; height: 100%;
-  background: radial-gradient(ellipse at 15% 22%, #fffc 0 7%, #fff0 8%), radial-gradient(ellipse at 88% 48%, #fffc 0 8%, #fff0 9%), radial-gradient(ellipse at 10% 70%, #fffc 0 7%, #fff0 8%), linear-gradient(#5db4ee, #a9dcf8 55%, #e4f4ff); }
+  background: radial-gradient(ellipse at 15% 22%, #fffc 0 7%, #fff0 8%), radial-gradient(ellipse at 88% 48%, #fffc 0 8%, #fff0 9%), radial-gradient(ellipse at 10% 70%, #fffc 0 7%, #fff0 8%), linear-gradient(#625dee, #a9aaf8 55%, #e5e4ff); }
 .kay { display: flex; flex-direction: column; align-items: center; justify-content: center; color: #fff; font-weight: 700; text-shadow: 0 .4cqw 0 #6b4220;
   background: linear-gradient(#e0a460, #b97a3a); border: .6cqw solid #8a5a2b; border-radius: 2.5cqw; box-shadow: 0 .9cqw 0 #6b4220; }
-.bir { display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 600; background: linear-gradient(#2f6fd6, #1b4aa8); border: .5cqw solid #0f2a63; border-radius: 2cqw; box-shadow: 0 .6cqw 0 #0b2a60; }
-.kartu { background: linear-gradient(#fff, #f1f7fd); border-radius: 4cqw; box-shadow: 0 .9cqw 0 #b8d0ec, 0 2cqw 3cqw rgba(20,60,120,.2); color: #17306b; }
-.bt { border-radius: 50% !important; background: radial-gradient(circle at 35% 30%, #5ab4ff, #1769d6); border: .6cqw solid #fff !important; box-shadow: 0 .6cqw 0 #0d3f94; color: #fff; display: flex; align-items: center; justify-content: center; padding: 0; }
+.bir { display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 600; background: linear-gradient(#592fd6, #451ba8); border: .5cqw solid #290f63; border-radius: 2cqw; box-shadow: 0 .6cqw 0 #220b60; }
+.kartu { background: linear-gradient(#fff, #f3f1fd); border-radius: 4cqw; box-shadow: 0 .9cqw 0 #c1b8ec, 0 2cqw 3cqw rgba(43,20,120,.2); color: #33176b; }
+.bt { border-radius: 50% !important; background: radial-gradient(circle at 35% 30%, #685aff, #3e17d6); border: .6cqw solid #fff !important; box-shadow: 0 .6cqw 0 #310d94; color: #fff; display: flex; align-items: center; justify-content: center; padding: 0; }
 .bt svg { width: 55%; height: 55%; }
 .pil { display: flex; align-items: center; justify-content: center; gap: 1.2cqw; color: #fff; font-weight: 600; font-size: 3.4cqw; border-radius: 3.5cqw; }
 .pil svg { width: 4.6cqw; height: 4.6cqw; }
 .nd { border-radius: 50%; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #fff; font-weight: 700; font-size: 3.4cqw; line-height: 1; padding: 0;
-  border: .6cqw solid #e8f1fb !important; background: radial-gradient(circle at 35% 30%, #aab5c6, #6d7a90); box-shadow: 0 .6cqw 0 #4d596d; }
-.nd.b { background: radial-gradient(circle at 35% 30%, #58b0ff, #1569d8); box-shadow: 0 .6cqw 0 #0d3f94; font-size: 5cqw; }
+  border: .6cqw solid #ebe8fb !important; background: radial-gradient(circle at 35% 30%, #b1aac6, #766d90); box-shadow: 0 .6cqw 0 #554d6d; }
+.nd.b { background: radial-gradient(circle at 35% 30%, #6a58ff, #3d15d8); box-shadow: 0 .6cqw 0 #310d94; font-size: 5cqw; }
 .nd svg { width: 2.6cqw; margin-bottom: .3cqw; }
 .pu i, .pu b { position: absolute; display: block; }
 .pu b { inset: 22% 4% 0 4%; background: linear-gradient(#9a6b3f, #5f3b20); clip-path: polygon(0 0, 100% 0, 90% 50%, 62% 100%, 46% 82%, 14% 52%); }
@@ -773,7 +798,7 @@ const gayaPeta = `
 .profil-mini .profil-info strong { font-size: 2.8cqw; }
 .profil-mini .xp { height: 1.4cqw; margin: .4cqw 0 .3cqw; }
 .nl { position: absolute; border-radius: 50%; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #fff; font-weight: 700; font-size: 3.7cqw; line-height: 1;
-  border: .75cqw solid #c3cfdf; background: radial-gradient(circle at 38% 28%, #5b7396, #2b405f 55%, #1b2c47); box-shadow: 0 .8cqw 0 #14233b, 0 1.6cqw 1.8cqw rgba(15,40,90,.35); text-shadow: 0 .3cqw 0 rgba(0,0,0,.35); pointer-events: none; }
+  border: .75cqw solid #c9c3df; background: radial-gradient(circle at 38% 28%, #685b96, #372b5f 55%, #261b47); box-shadow: 0 .8cqw 0 #1e143b, 0 1.6cqw 1.8cqw rgba(38,15,90,.35); text-shadow: 0 .3cqw 0 rgba(0,0,0,.35); pointer-events: none; }
 .nl svg { width: 2.4cqw; margin-bottom: .3cqw; }
 .misi-mini { left: 74.5cqw; top: 14.2cqw; width: 23.5cqw; height: 10.6cqw; gap: 1cqw; padding: 0 1cqw 0 1.3cqw; border-radius: 2.6cqw; }
 .misi-mini .misi-ikon { width: 3.6cqw; }
@@ -783,30 +808,30 @@ const gayaPeta = `
 .misi-mini .misi-progres .bar { height: 1.1cqw; }
 .misi-mini .misi-progres em { font-size: 1.4cqw; }
 .misi-mini .panah { width: 1.6cqw; height: 2.4cqw; }
-.opsi { display: flex; align-items: center; gap: 3cqw; padding: 0 4cqw; border-radius: 3cqw; font-weight: 600; font-size: 4cqw; text-align: left; color: #17306b; border: .5cqw solid transparent !important; box-shadow: 0 .6cqw 0 rgba(0,0,0,.12); }
+.opsi { display: flex; align-items: center; gap: 3cqw; padding: 0 4cqw; border-radius: 3cqw; font-weight: 600; font-size: 4cqw; text-align: left; color: #33176b; border: .5cqw solid transparent !important; box-shadow: 0 .6cqw 0 rgba(0,0,0,.12); }
 .opsi svg { width: 6cqw; height: 6cqw; flex: none; }
-.chip { display: flex; align-items: center; justify-content: center; gap: 1.5cqw; background: #fff; border-radius: 3cqw; font-size: 3.2cqw; font-weight: 500; box-shadow: 0 .5cqw 0 #b8d0ec; color: #17306b; }
+.chip { display: flex; align-items: center; justify-content: center; gap: 1.5cqw; background: #fff; border-radius: 3cqw; font-size: 3.2cqw; font-weight: 500; box-shadow: 0 .5cqw 0 #c1b8ec; color: #33176b; }
 .chip svg { width: 4.5cqw; height: 4.5cqw; }
 .tbl-hijau { background: linear-gradient(#7ee35a, #3bb03a) !important; border-color: #258a2a !important; box-shadow: 0 1cqw 0 #1c6e20 !important; color: #fff !important; }
-.tbl-putih { background: #fff !important; border-color: #cfe0f4 !important; box-shadow: 0 .8cqw 0 #b8d0ec !important; font-size: 4cqw !important; }
+.tbl-putih { background: #fff !important; border-color: #d5cff4 !important; box-shadow: 0 .8cqw 0 #c1b8ec !important; font-size: 4cqw !important; }
 `
  
 /* ----- ikon kecil ----- */
 const Seg = ({ c = '#ffc72a' }) => <svg viewBox="0 0 40 40"><path d="M20 5 L36 34 H4Z" fill={c} stroke="#d98a00" strokeWidth="3" strokeLinejoin="round" /></svg>
-const Per = ({ c = '#2f8cf0' }) => <svg viewBox="0 0 40 40"><rect x="5" y="5" width="30" height="30" rx="4" fill={c} stroke="#1450a8" strokeWidth="3" /></svg>
+const Per = ({ c = '#4c2ff0' }) => <svg viewBox="0 0 40 40"><rect x="5" y="5" width="30" height="30" rx="4" fill={c} stroke="#3614a8" strokeWidth="3" /></svg>
 const Lin = ({ c = '#ff5a78' }) => <svg viewBox="0 0 40 40"><circle cx="20" cy="20" r="15" fill={c} stroke="#b82040" strokeWidth="3" /></svg>
 const Pjg = ({ c = '#5fd05a' }) => <svg viewBox="0 0 40 40"><rect x="3" y="9" width="34" height="22" rx="4" fill={c} stroke="#2a8a2e" strokeWidth="3" /></svg>
 const Bin = ({ on = true, s = 7 }) => (
   <svg viewBox="0 0 24 24" style={{ width: s + 'cqw', height: s + 'cqw' }}>
-    <path d="M12 1.8 L15.2 8.6 L22.4 9.4 L17 14.4 L18.6 21.7 L12 18 L5.4 21.7 L7 14.4 L1.6 9.4 L8.8 8.6Z" fill={on ? '#ffc928' : '#aab6c6'} stroke={on ? '#d98a00' : '#7d8ba0'} strokeWidth="1.6" strokeLinejoin="round" />
+    <path d="M12 1.8 L15.2 8.6 L22.4 9.4 L17 14.4 L18.6 21.7 L12 18 L5.4 21.7 L7 14.4 L1.6 9.4 L8.8 8.6Z" fill={on ? '#ffc928' : '#b0aac6'} stroke={on ? '#d98a00' : '#857da0'} strokeWidth="1.6" strokeLinejoin="round" />
   </svg>
 )
 const Koin = () => <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="#ffc928" stroke="#d98a00" strokeWidth="2" /><circle cx="12" cy="12" r="5.5" fill="none" stroke="#f0a30c" strokeWidth="1.6" /></svg>
-const Gm = () => <svg viewBox="0 0 12 14"><rect x="1" y="6" width="10" height="8" rx="2" fill="#dfe6ef" /><path d="M3.5 6 V4 A2.5 2.5 0 0 1 8.5 4 V6" fill="none" stroke="#dfe6ef" strokeWidth="1.6" /></svg>
+const Gm = () => <svg viewBox="0 0 12 14"><rect x="1" y="6" width="10" height="8" rx="2" fill="#e2dfef" /><path d="M3.5 6 V4 A2.5 2.5 0 0 1 8.5 4 V6" fill="none" stroke="#e2dfef" strokeWidth="1.6" /></svg>
 const Panah = ({ r = 0 }) => <svg viewBox="0 0 24 24" style={{ transform: `rotate(${r}deg)` }}><path d="M14 5 L7 12 L14 19" stroke="#fff" strokeWidth="3.6" fill="none" strokeLinecap="round" strokeLinejoin="round" /></svg>
 const Mas = ({ st }: { st: object }) => (
   <svg viewBox="0 0 100 110" className="abs" style={{ position: 'absolute', filter: 'drop-shadow(0 1.2cqw .8cqw rgba(30,60,20,.3))', ...st }}>
-    <rect x="2" y="48" width="26" height="40" rx="9" fill="#2f72dc" stroke="#12378a" strokeWidth="2" />
+    <rect x="2" y="48" width="26" height="40" rx="9" fill="#5a2fdc" stroke="#39128a" strokeWidth="2" />
     <path d="M50 8 L10 92 H90Z" fill="#ffd428" stroke="#ffd428" strokeWidth="12" strokeLinejoin="round" />
     <path d="M50 8 L10 92 H40Z" fill="#e8a400" opacity=".3" />
     <ellipse cx="42" cy="58" rx="8" ry="10" fill="#fff" stroke="#222" strokeWidth="1.5" /><ellipse cx="64" cy="58" rx="8" ry="10" fill="#fff" stroke="#222" strokeWidth="1.5" />
@@ -924,58 +949,58 @@ const LEVEL: Level[] = [
     },
     soal: [
       {
-        q: 'Manakah gambar yang berbentuk segitiga?',
+        q: 'Ayo cari! Mana gambar yang berbentuk segitiga?',
         gambar: 'tanya',
         mode: 'gambar',
         opsi: [
+          { t: 'Persegi panjang', ik: 'pjg' },
+          { t: 'Lingkaran', ik: 'lin' },
           { t: 'Persegi', ik: 'per' },
           { t: 'Segitiga', ik: 'seg' },
-          { t: 'Lingkaran', ik: 'lin' },
-          { t: 'Persegi panjang', ik: 'pjg' },
         ],
-        benar: 1,
-        petunjuk: 'Segitiga punya 3 sisi lurus dan 3 sudut, mirip puncak gunung.',
+        benar: 3,
+        petunjuk: 'Segitiga punya 3 sisi lurus dan 3 sudut, seperti puncak gunung atau atap rumah.',
       },
       {
-        q: 'Bangun datar manakah yang berbentuk bulat?',
+        q: 'Bentuk apa yang bulat seperti piring dan tidak punya sudut?',
         gambar: 'tanya',
         mode: 'teks',
         opsi: [
-          { t: 'Segitiga', ik: 'seg' },
           { t: 'Persegi', ik: 'per' },
           { t: 'Lingkaran', ik: 'lin' },
+          { t: 'Segitiga', ik: 'seg' },
         ],
-        benar: 2,
-        petunjuk: 'Bulat tidak punya sudut. Sisinya melengkung mulus, seperti koin.',
+        benar: 1,
+        petunjuk: 'Piring itu bulat dan tepinya melengkung mulus. Bentuk seperti itu disebut lingkaran.',
       },
       {
-        q: 'Pilih gambar yang merupakan persegi.',
+        q: 'Sentuh gambar yang berbentuk persegi!',
         gambar: 'tanya',
         mode: 'gambar',
         opsi: [
-          { t: 'Lingkaran', ik: 'lin' },
-          { t: 'Persegi panjang', ik: 'pjg' },
-          { t: 'Persegi', ik: 'per' },
           { t: 'Segitiga', ik: 'seg' },
+          { t: 'Persegi', ik: 'per' },
+          { t: 'Persegi panjang', ik: 'pjg' },
+          { t: 'Lingkaran', ik: 'lin' },
         ],
-        benar: 2,
-        petunjuk: 'Persegi punya 4 sisi sama panjang. Persegi panjang tidak semua sisinya sama.',
-      },
-      {
-        q: 'Bentuk apa yang memiliki tiga sisi?',
-        gambar: 'tanya',
-        mode: 'teks',
-        opsi: [{ t: 'Lingkaran' }, { t: 'Persegi' }, { t: 'Segitiga' }, { t: 'Persegi panjang' }],
-        benar: 2,
-        petunjuk: 'Hitung sisi lurusnya. Ada tiga? Itu segitiga. "Tri" artinya tiga.',
-      },
-      {
-        q: 'Bangun datar apa yang memiliki empat sisi sama panjang?',
-        gambar: 'tanya',
-        mode: 'teks',
-        opsi: [{ t: 'Persegi panjang' }, { t: 'Persegi' }, { t: 'Segitiga' }, { t: 'Lingkaran' }],
         benar: 1,
-        petunjuk: 'Empat sisi sama panjang adalah ciri persegi, seperti ubin kotak.',
+        petunjuk: 'Persegi punya 4 sisi yang sama panjang. Persegi panjang punya sisi panjang dan sisi pendek.',
+      },
+      {
+        q: 'Bangun datar mana yang memiliki 3 sisi lurus?',
+        gambar: 'tanya',
+        mode: 'teks',
+        opsi: [{ t: 'Persegi' }, { t: 'Segitiga' }, { t: 'Lingkaran' }, { t: 'Persegi panjang' }],
+        benar: 1,
+        petunjuk: 'Hitung sisi lurusnya. Kalau ada tiga, itu segitiga. "Tri" artinya tiga.',
+      },
+      {
+        q: 'Sebuah ubin berbentuk kotak dengan 4 sisi sama panjang. Itu bangun datar apa?',
+        gambar: 'tanya',
+        mode: 'teks',
+        opsi: [{ t: 'Lingkaran' }, { t: 'Segitiga' }, { t: 'Persegi' }, { t: 'Persegi panjang' }],
+        benar: 2,
+        petunjuk: 'Empat sisi sama panjang adalah ciri persegi.',
       },
     ],
   },
@@ -1026,52 +1051,52 @@ const LEVEL: Level[] = [
     },
     soal: [
       {
-        q: 'Berapa jumlah sisi pada segitiga?',
+        q: 'Ada berapa sisi lurus pada segitiga?',
         gambar: 'seg',
         mode: 'teks',
         opsi: [{ t: '2 sisi' }, { t: '3 sisi' }, { t: '4 sisi' }],
         benar: 1,
-        petunjuk: 'Hitung sisi lurus pada segitiga satu per satu. Jumlahnya 3.',
+        petunjuk: 'Telusuri tepi segitiga dengan jari. Kamu akan menemukan 3 sisi lurus.',
       },
       {
-        q: 'Berapa jumlah titik sudut pada persegi?',
-        gambar: 'per',
+        q: 'Berapa jumlah titik sudut pada persegi panjang?',
+        gambar: 'pjg',
         mode: 'teks',
-        opsi: [{ t: '3 titik sudut' }, { t: '4 titik sudut' }, { t: '5 titik sudut' }],
+        opsi: [{ t: '2 titik sudut' }, { t: '4 titik sudut' }, { t: '6 titik sudut' }],
         benar: 1,
-        petunjuk: 'Titik sudut adalah ujung pertemuan dua sisi. Persegi punya 4 ujung.',
+        petunjuk: 'Titik sudut adalah ujung tempat dua sisi bertemu. Persegi panjang punya 4 ujung.',
       },
       {
-        q: 'Berapa jumlah titik sudut pada lingkaran?',
+        q: 'Berapa jumlah sisi lurus pada lingkaran?',
         gambar: 'lin',
         mode: 'teks',
-        opsi: [{ t: 'Tidak ada (0)' }, { t: '1 titik sudut' }, { t: '4 titik sudut' }],
+        opsi: [{ t: 'Tidak ada (0)' }, { t: '1 sisi' }, { t: '2 sisi' }],
         benar: 0,
-        petunjuk: 'Lingkaran melengkung mulus, jadi tidak punya titik sudut.',
+        petunjuk: 'Tepi lingkaran melengkung mulus, jadi tidak punya sisi lurus.',
       },
       {
-        q: 'Bangun datar apa yang memiliki empat sisi?',
+        q: 'Bangun datar mana yang memiliki 3 titik sudut?',
         gambar: 'tanya',
         mode: 'teks',
         opsi: [
           { t: 'Segitiga', ik: 'seg' },
           { t: 'Persegi', ik: 'per' },
           { t: 'Lingkaran', ik: 'lin' },
+        ],
+        benar: 0,
+        petunjuk: 'Segitiga punya 3 sisi dan 3 titik sudut. Persegi punya 4, lingkaran tidak punya.',
+      },
+      {
+        q: 'Bangun datar mana yang tepinya melengkung dan tidak punya titik sudut?',
+        gambar: 'tanya',
+        mode: 'teks',
+        opsi: [
+          { t: 'Persegi', ik: 'per' },
+          { t: 'Lingkaran', ik: 'lin' },
+          { t: 'Segitiga', ik: 'seg' },
         ],
         benar: 1,
-        petunjuk: 'Segitiga punya 3 sisi, persegi punya 4, lingkaran tidak punya sisi lurus.',
-      },
-      {
-        q: 'Bangun datar apa yang tidak memiliki titik sudut?',
-        gambar: 'tanya',
-        mode: 'teks',
-        opsi: [
-          { t: 'Segitiga', ik: 'seg' },
-          { t: 'Persegi', ik: 'per' },
-          { t: 'Lingkaran', ik: 'lin' },
-        ],
-        benar: 2,
-        petunjuk: 'Cari bentuk yang tepinya melengkung tanpa ujung runcing: lingkaran.',
+        petunjuk: 'Cari bentuk tanpa ujung runcing. Itu lingkaran.',
       },
     ],
   },
@@ -1128,7 +1153,7 @@ const LEVEL: Level[] = [
     },
     soal: [
       {
-        q: 'Jam dinding berbentuk bulat menyerupai bangun datar apa?',
+        q: 'Jam dinding pada gambar berbentuk bulat. Bangun datar apa yang sama dengannya?',
         gambar: 'jam',
         mode: 'teks',
         opsi: [
@@ -1137,10 +1162,10 @@ const LEVEL: Level[] = [
           { t: 'Persegi', ik: 'per' },
         ],
         benar: 1,
-        petunjuk: 'Jam dinding itu bulat dan tidak punya sudut. Sama seperti lingkaran.',
+        petunjuk: 'Jam dinding itu bulat dan tidak punya sudut, sama seperti lingkaran.',
       },
       {
-        q: 'Atap rumah pada gambar menyerupai bentuk apa?',
+        q: 'Bagian atas atap rumah pada gambar berbentuk bangun datar apa?',
         gambar: 'atap',
         mode: 'teks',
         opsi: [
@@ -1149,10 +1174,10 @@ const LEVEL: Level[] = [
           { t: 'Segitiga', ik: 'seg' },
         ],
         benar: 2,
-        petunjuk: 'Atap pada gambar punya 3 sisi dan 3 sudut: segitiga.',
+        petunjuk: 'Atap pada gambar punya 3 sisi dan 3 sudut, jadi bentuknya segitiga.',
       },
       {
-        q: 'Ubin dengan empat sisi sama panjang menyerupai apa?',
+        q: 'Ubin lantai pada gambar punya 4 sisi sama panjang. Itu bentuk apa?',
         gambar: 'ubin',
         mode: 'teks',
         opsi: [
@@ -1164,23 +1189,23 @@ const LEVEL: Level[] = [
         petunjuk: 'Ubin yang keempat sisinya sama panjang berbentuk persegi.',
       },
       {
-        q: 'Pintu berbentuk persegi panjang memiliki berapa sisi?',
+        q: 'Pintu rumah berbentuk persegi panjang. Berapa titik sudutnya?',
         gambar: 'pintu',
         mode: 'teks',
-        opsi: [{ t: '3 sisi' }, { t: '4 sisi' }, { t: '5 sisi' }],
+        opsi: [{ t: '3 titik sudut' }, { t: '4 titik sudut' }, { t: '5 titik sudut' }],
         benar: 1,
-        petunjuk: 'Pintu persegi panjang punya 4 sisi: 2 sisi panjang dan 2 sisi pendek.',
+        petunjuk: 'Persegi panjang punya 4 sisi dan 4 titik sudut, sama seperti pintu.',
       },
       {
-        q: 'Roda sepeda jika dilihat dari samping berbentuk apa?',
+        q: 'Lihat roda sepeda dari samping. Bangun datar apa yang terlihat?',
         gambar: 'roda',
         mode: 'teks',
         opsi: [
+          { t: 'Persegi', ik: 'per' },
           { t: 'Lingkaran', ik: 'lin' },
           { t: 'Segitiga', ik: 'seg' },
-          { t: 'Persegi', ik: 'per' },
         ],
-        benar: 0,
+        benar: 1,
         petunjuk: 'Dari samping, roda sepeda bulat sempurna, yaitu lingkaran.',
       },
     ],
@@ -1440,16 +1465,16 @@ const gayaGame = `
 .tg-in { width: 100%; height: 100%; animation: melayang 1.6s ease-in-out infinite; filter: drop-shadow(0 0 1.3cqw rgba(255,255,255,.95)) drop-shadow(0 .4cqw 0 rgba(0,0,0,.2)); }
 .tg-in svg { width: 100%; height: 100%; }
 .tg-lab { position: absolute; left: 50%; top: -3.6cqw; transform: translateX(-50%); white-space: nowrap; font-size: 2.5cqw; font-weight: 700; color: #fff;
-  background: rgba(15,49,112,.82); padding: .3cqw 1.4cqw; border-radius: 1.4cqw; }
+  background: rgba(42,15,112,.82); padding: .3cqw 1.4cqw; border-radius: 1.4cqw; }
 .kn { width: 4cqw; height: 4cqw; }
 .kn svg { width: 100%; height: 100%; animation: putar 1.2s linear infinite; }
 .mu { width: ${ES}cqw; height: ${ES}cqw; }
 .mu-in { width: 100%; height: 100%; transform-origin: 50% 100%; animation: goyang .55s ease-in-out infinite alternate; }
 .mu-in svg { width: 100%; height: 100%; filter: drop-shadow(0 .5cqw 0 rgba(0,0,0,.22)); }
-.gb-chip { display: flex; align-items: center; gap: .8cqw; background: rgba(15,49,112,.9); color: #fff; font-weight: 700; font-size: 2.8cqw; padding: .6cqw 1.8cqw; border-radius: 2cqw; }
+.gb-chip { display: flex; align-items: center; gap: .8cqw; background: rgba(42,15,112,.9); color: #fff; font-weight: 700; font-size: 2.8cqw; padding: .6cqw 1.8cqw; border-radius: 2cqw; }
 .gb-chip svg { width: 2.6cqw; }
 .gb-panah { width: 5cqw; height: 5cqw; animation: lompat .7s ease-in-out infinite; }
-.toast { left: 8cqw; width: 84cqw; top: 27.5cqw; text-align: center; background: rgba(15,49,112,.92); color: #fff; font-weight: 600; font-size: 3.2cqw;
+.toast { left: 8cqw; width: 84cqw; top: 27.5cqw; text-align: center; background: rgba(42,15,112,.92); color: #fff; font-weight: 600; font-size: 3.2cqw;
   padding: 1.6cqw 3cqw; border-radius: 3cqw; box-shadow: 0 .6cqw 0 rgba(0,0,0,.2); pointer-events: none; z-index: 9; }
 
 /* ---------- ledakan konfeti bentuk ---------- */
@@ -1467,22 +1492,22 @@ const gayaGame = `
 .slot-n { font-size: 3.6cqw; padding-left: 1cqw; }
 .kontrol { touch-action: none; -webkit-touch-callout: none; }
 .petunjuk-kontrol { color: #fff; font-size: 2.6cqw; font-weight: 500; text-align: center; line-height: 1.25; text-shadow: 0 .3cqw 0 rgba(0,0,0,.4); pointer-events: none; }
-.tirai { inset: 0; background: rgba(8,24,60,.62); z-index: 20; }
+.tirai { inset: 0; background: rgba(25,8,60,.62); z-index: 20; }
 
 /* ---------- kuis ---------- */
-.prog { background: #0f3170; border-radius: 2cqw; overflow: hidden; box-shadow: inset 0 .3cqw .5cqw rgba(0,0,0,.4); }
+.prog { background: #2a0f70; border-radius: 2cqw; overflow: hidden; box-shadow: inset 0 .3cqw .5cqw rgba(0,0,0,.4); }
 .prog i { display: block; height: 100%; background: linear-gradient(#ffd75a, #ff9f0f); border-radius: 2cqw; transition: width .4s; }
-.prog-n { font-weight: 700; font-size: 3.4cqw; color: #fff; text-shadow: 0 .3cqw 0 #0b2a60; }
+.prog-n { font-weight: 700; font-size: 3.4cqw; color: #fff; text-shadow: 0 .3cqw 0 #220b60; }
 .ilus { flex: 1; min-height: 0; }
 .ilus svg { width: 100%; height: 100%; }
-.ilus-bentuk { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; border-radius: 3cqw; background: linear-gradient(#cfeaff, #eef8ff); border: .6cqw solid #d6e6f8; }
-.ilus-bentuk svg { height: 88%; width: auto; aspect-ratio: 1; filter: drop-shadow(0 .8cqw 0 rgba(20,60,120,.18)); }
+.ilus-bentuk { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; border-radius: 3cqw; background: linear-gradient(#d2cfff, #efeeff); border: .6cqw solid #dcd6f8; }
+.ilus-bentuk svg { height: 88%; width: auto; aspect-ratio: 1; filter: drop-shadow(0 .8cqw 0 rgba(43,20,120,.18)); }
 .opsi:disabled { cursor: default; }
 .opsi:active:not(:disabled), .ubin-g:active:not(:disabled) { transform: translateY(.6cqw); }
 .opsi.benar, .ubin-g.benar { background: linear-gradient(#7ee35a, #3bb03a) !important; border-color: #258a2a !important; color: #fff !important; box-shadow: 0 .9cqw 0 #1c6e20 !important; }
 .opsi.salah, .ubin-g.salah { background: linear-gradient(#ff8f8f, #e04848) !important; border-color: #a82a2a !important; color: #fff !important; box-shadow: 0 .9cqw 0 #8c2020 !important; animation: goyang-salah .45s; }
 .opsi.pudar, .ubin-g.pudar { opacity: .5; }
-.ubin-g { display: flex; align-items: center; justify-content: center; background: #fff; border: .7cqw solid #cfe0f4 !important; border-radius: 4cqw; box-shadow: 0 .9cqw 0 #b8d0ec; padding: 0; }
+.ubin-g { display: flex; align-items: center; justify-content: center; background: #fff; border: .7cqw solid #d5cff4 !important; border-radius: 4cqw; box-shadow: 0 .9cqw 0 #c1b8ec; padding: 0; }
 .ubin-ik { width: 52%; height: 78%; display: flex; }
 .ubin-ik svg { width: 100%; height: 100%; }
 .ubin-tanda { position: absolute; right: 1.6cqw; top: 1.6cqw; width: 6cqw; height: 6cqw; }
@@ -1490,9 +1515,9 @@ const gayaGame = `
 .masuk { animation: geser-masuk .35s ease-out backwards; }
 .pop { display: inline-flex; animation: bintang-pop .6s ease-out; }
 .hilang { display: inline-flex; animation: hati-pecah .6s ease-out; }
-.sheet { z-index: 10; border-radius: 6cqw 6cqw 0 0; box-shadow: 0 -1cqw 3cqw rgba(8,30,70,.3); animation: naik .3s ease-out; }
+.sheet { z-index: 10; border-radius: 6cqw 6cqw 0 0; box-shadow: 0 -1cqw 3cqw rgba(25,8,70,.3); animation: naik .3s ease-out; }
 .sheet b.jdl { font-size: 4.5cqw; display: block; line-height: 1.15; }
-.sheet p { font-size: 3cqw; line-height: 1.3; margin-top: .8cqw; color: #2c466f; }
+.sheet p { font-size: 3cqw; line-height: 1.3; margin-top: .8cqw; color: #3c2c6f; }
 
 /* ---------- hasil ---------- */
 .bintang-hasil { display: inline-flex; animation: bintang-pop .7s ease-out backwards; }
@@ -1527,14 +1552,14 @@ const acak = <T,>(arr: T[]): T[] => {
   }
   return h
 }
-const WARNA_OPSI = ['#ffe9a0', '#cfe6ff', '#d6f5c8', '#ffd0dc']
-const WARNA_KONFETI = ['#ffc72a', '#2f8cf0', '#ff5a78', '#5fd05a', '#a97bff']
+const WARNA_OPSI = ['#ffe9a0', '#d6cfff', '#d6f5c8', '#ffd0dc']
+const WARNA_KONFETI = ['#ffc72a', '#7a5cf0', '#ff5a78', '#3ddc97', '#ff9f43', '#4dd0e1']
 const jumlahBintang = (k: Kemajuan) => k.bintang.reduce((s, b) => s + b, 0)
 
 /* ----- ikon kecil ----- */
 const Hati = ({ on = true, s = 5.5 }: { on?: boolean; s?: number }) => (
   <svg viewBox="0 0 24 24" style={{ width: s + 'cqw', height: s + 'cqw' }}>
-    <path d="M12 21.2 C5 15.4 2 12 2 8.4 A5 5 0 0 1 12 6.2 A5 5 0 0 1 22 8.4 C22 12 19 15.4 12 21.2Z" fill={on ? '#ff4d6d' : '#aab6c6'} stroke={on ? '#b8203f' : '#7d8ba0'} strokeWidth="1.6" strokeLinejoin="round" />
+    <path d="M12 21.2 C5 15.4 2 12 2 8.4 A5 5 0 0 1 12 6.2 A5 5 0 0 1 22 8.4 C22 12 19 15.4 12 21.2Z" fill={on ? '#ff4d6d' : '#b0aac6'} stroke={on ? '#b8203f' : '#857da0'} strokeWidth="1.6" strokeLinejoin="round" />
     {on && <ellipse cx="7.6" cy="8.6" rx="2" ry="1.3" fill="#fff" opacity=".6" transform="rotate(-30 7.6 8.6)" />}
   </svg>
 )
@@ -1563,7 +1588,7 @@ function Ikon({ k }: { k: IkonKey }) {
       )
     case 'sisi4':
       return (
-        <svg viewBox="0 0 40 40"><rect x="5" y="5" width="30" height="30" rx="4" fill="#2f8cf0" stroke="#1450a8" strokeWidth="3" /><text x="20" y="27.5" textAnchor="middle" fontSize="17" fontWeight="700" fill="#fff">4</text></svg>
+        <svg viewBox="0 0 40 40"><rect x="5" y="5" width="30" height="30" rx="4" fill="#4c2ff0" stroke="#3614a8" strokeWidth="3" /><text x="20" y="27.5" textAnchor="middle" fontSize="17" fontWeight="700" fill="#fff">4</text></svg>
       )
     case 'sudut':
       return (
@@ -1575,9 +1600,9 @@ function Ikon({ k }: { k: IkonKey }) {
     case 'jam':
       return (
         <svg viewBox="0 0 40 40">
-          <circle cx="20" cy="20" r="16" fill="#fff" stroke="#3b5ea0" strokeWidth="3.2" />
-          <path d="M20 8 V10.5 M20 29.5 V32 M8 20 H10.5 M29.5 20 H32" stroke="#3b5ea0" strokeWidth="2" strokeLinecap="round" />
-          <path d="M20 20 V12 M20 20 L26 23" stroke="#17306b" strokeWidth="2.6" strokeLinecap="round" />
+          <circle cx="20" cy="20" r="16" fill="#fff" stroke="#583ba0" strokeWidth="3.2" />
+          <path d="M20 8 V10.5 M20 29.5 V32 M8 20 H10.5 M29.5 20 H32" stroke="#583ba0" strokeWidth="2" strokeLinecap="round" />
+          <path d="M20 20 V12 M20 20 L26 23" stroke="#33176b" strokeWidth="2.6" strokeLinecap="round" />
           <circle cx="20" cy="20" r="1.8" fill="#e03a52" />
         </svg>
       )
@@ -1593,8 +1618,8 @@ function Ikon({ k }: { k: IkonKey }) {
       return (
         <svg viewBox="0 0 40 40">
           <rect x="4" y="4" width="15" height="15" rx="1.5" fill="#f4d9a8" stroke="#b9893c" strokeWidth="2" />
-          <rect x="21" y="4" width="15" height="15" rx="1.5" fill="#9ed0ff" stroke="#3b7dd1" strokeWidth="2" />
-          <rect x="4" y="21" width="15" height="15" rx="1.5" fill="#9ed0ff" stroke="#3b7dd1" strokeWidth="2" />
+          <rect x="21" y="4" width="15" height="15" rx="1.5" fill="#a99eff" stroke="#583bd1" strokeWidth="2" />
+          <rect x="4" y="21" width="15" height="15" rx="1.5" fill="#a99eff" stroke="#583bd1" strokeWidth="2" />
           <rect x="21" y="21" width="15" height="15" rx="1.5" fill="#f4d9a8" stroke="#b9893c" strokeWidth="2" />
         </svg>
       )
@@ -1609,9 +1634,9 @@ function Ikon({ k }: { k: IkonKey }) {
     case 'roda':
       return (
         <svg viewBox="0 0 40 40">
-          <circle cx="20" cy="20" r="16" fill="none" stroke="#2b3a55" strokeWidth="4" />
-          <path d="M20 5 V35 M5 20 H35 M9.5 9.5 L30.5 30.5 M30.5 9.5 L9.5 30.5" stroke="#8fa0bd" strokeWidth="1.4" />
-          <circle cx="20" cy="20" r="3" fill="#2b3a55" />
+          <circle cx="20" cy="20" r="16" fill="none" stroke="#372b55" strokeWidth="4" />
+          <path d="M20 5 V35 M5 20 H35 M9.5 9.5 L30.5 30.5 M30.5 9.5 L9.5 30.5" stroke="#9b8fbd" strokeWidth="1.4" />
+          <circle cx="20" cy="20" r="3" fill="#372b55" />
         </svg>
       )
   }
@@ -1626,18 +1651,18 @@ function Ilustrasi({ k }: { k: IkonKey | 'tanya' }) {
       <svg viewBox="0 0 120 80" style={kotak}>
         <rect width="120" height="80" fill="#f6e6c8" /><rect y="66" width="120" height="14" fill="#c99a62" />
         <circle cx="60" cy="36" r="29" fill="#fff" stroke="#8a5a2b" strokeWidth="5" />
-        {Array.from({ length: 12 }, (_, i) => <line key={i} x1="60" y1="11" x2="60" y2={i % 3 === 0 ? 17 : 14} stroke="#3b5ea0" strokeWidth={i % 3 === 0 ? 2.6 : 1.6} strokeLinecap="round" transform={`rotate(${i * 30} 60 36)`} />)}
-        <path d="M60 36 V20 M60 36 L72 42" stroke="#17306b" strokeWidth="3.4" strokeLinecap="round" /><circle cx="60" cy="36" r="2.8" fill="#e03a52" />
+        {Array.from({ length: 12 }, (_, i) => <line key={i} x1="60" y1="11" x2="60" y2={i % 3 === 0 ? 17 : 14} stroke="#583ba0" strokeWidth={i % 3 === 0 ? 2.6 : 1.6} strokeLinecap="round" transform={`rotate(${i * 30} 60 36)`} />)}
+        <path d="M60 36 V20 M60 36 L72 42" stroke="#33176b" strokeWidth="3.4" strokeLinecap="round" /><circle cx="60" cy="36" r="2.8" fill="#e03a52" />
       </svg>
     )
   }
   if (k === 'atap') {
     return (
-      <svg viewBox="0 0 120 80" style={{ ...kotak, background: 'linear-gradient(#8fd0ff,#d8f0ff)' }}>
+      <svg viewBox="0 0 120 80" style={{ ...kotak, background: 'linear-gradient(#958fff,#d9d8ff)' }}>
         <rect y="68" width="120" height="12" fill="#7ad25a" />
         <path d="M18 40 L60 8 L102 40Z" fill="#d4402c" stroke="#8a2418" strokeWidth="3" strokeLinejoin="round" />
         <rect x="26" y="40" width="68" height="30" fill="#fff4de" stroke="#b89a60" strokeWidth="2" />
-        <rect x="34" y="48" width="14" height="14" fill="#8fd0ff" stroke="#8a5a2b" strokeWidth="2" /><rect x="56" y="48" width="14" height="22" fill="#a8733a" /><rect x="76" y="48" width="12" height="14" fill="#8fd0ff" stroke="#8a5a2b" strokeWidth="2" />
+        <rect x="34" y="48" width="14" height="14" fill="#958fff" stroke="#8a5a2b" strokeWidth="2" /><rect x="56" y="48" width="14" height="22" fill="#a8733a" /><rect x="76" y="48" width="12" height="14" fill="#958fff" stroke="#8a5a2b" strokeWidth="2" />
       </svg>
     )
   }
@@ -1647,7 +1672,7 @@ function Ilustrasi({ k }: { k: IkonKey | 'tanya' }) {
         <rect width="120" height="80" fill="#e9e2d2" />
         {Array.from({ length: 18 }, (_, i) => {
           const c = i % 6, r = Math.floor(i / 6)
-          return <rect key={i} x={6 + c * 18} y={6 + r * 24} width="17" height="17" rx="1.5" fill={(c + r) % 2 ? '#9ed0ff' : '#f4d9a8'} stroke={(c + r) % 2 ? '#3b7dd1' : '#b9893c'} strokeWidth="1.6" />
+          return <rect key={i} x={6 + c * 18} y={6 + r * 24} width="17" height="17" rx="1.5" fill={(c + r) % 2 ? '#a99eff' : '#f4d9a8'} stroke={(c + r) % 2 ? '#583bd1' : '#b9893c'} strokeWidth="1.6" />
         })}
         <rect x="42" y="30" width="17" height="17" rx="1.5" fill="none" stroke="#ff5a78" strokeWidth="2.4" strokeDasharray="3 2" />
       </svg>
@@ -1665,19 +1690,19 @@ function Ilustrasi({ k }: { k: IkonKey | 'tanya' }) {
   }
   if (k === 'roda') {
     return (
-      <svg viewBox="0 0 120 80" style={{ ...kotak, background: 'linear-gradient(#cfeaff,#eef8ff)' }}>
+      <svg viewBox="0 0 120 80" style={{ ...kotak, background: 'linear-gradient(#d2cfff,#efeeff)' }}>
         <rect y="70" width="120" height="10" fill="#9bd57a" />
         <path d="M60 41 L78 14 M60 41 L90 41" stroke="#e03a52" strokeWidth="4" strokeLinecap="round" />
-        <circle cx="60" cy="41" r="28" fill="none" stroke="#2b3a55" strokeWidth="5.5" />
-        {Array.from({ length: 12 }, (_, i) => <line key={i} x1="60" y1="41" x2="60" y2="15" stroke="#8fa0bd" strokeWidth="1.4" transform={`rotate(${i * 30} 60 41)`} />)}
-        <circle cx="60" cy="41" r="4" fill="#2b3a55" />
+        <circle cx="60" cy="41" r="28" fill="none" stroke="#372b55" strokeWidth="5.5" />
+        {Array.from({ length: 12 }, (_, i) => <line key={i} x1="60" y1="41" x2="60" y2="15" stroke="#9b8fbd" strokeWidth="1.4" transform={`rotate(${i * 30} 60 41)`} />)}
+        <circle cx="60" cy="41" r="4" fill="#372b55" />
       </svg>
     )
   }
   return (
-    <svg viewBox="0 0 120 80" style={{ ...kotak, background: 'linear-gradient(#cfeaff,#eef8ff)' }}>
-      <path d="M18 56 L34 24 L50 56Z" fill="none" stroke="#7da2d6" strokeWidth="3" strokeDasharray="4 3" strokeLinejoin="round" />
-      <rect x="70" y="26" width="30" height="30" rx="4" fill="none" stroke="#7da2d6" strokeWidth="3" strokeDasharray="4 3" />
+    <svg viewBox="0 0 120 80" style={{ ...kotak, background: 'linear-gradient(#d2cfff,#efeeff)' }}>
+      <path d="M18 56 L34 24 L50 56Z" fill="none" stroke="#907dd6" strokeWidth="3" strokeDasharray="4 3" strokeLinejoin="round" />
+      <rect x="70" y="26" width="30" height="30" rx="4" fill="none" stroke="#907dd6" strokeWidth="3" strokeDasharray="4 3" />
       <circle cx="60" cy="40" r="15" fill="#ffc72a" stroke="#d98a00" strokeWidth="3" />
       <text x="60" y="48" textAnchor="middle" fontSize="22" fontWeight="700" fill="#7a4a00">?</text>
     </svg>
@@ -1694,8 +1719,8 @@ function Penjaga({ jenis }: { jenis: Rintangan['jenis'] }) {
         <MataMarah cx={28} cy={31} />
       </>)}
       {jenis === 'kubus' && (<>
-        <rect x="3" y="5" width="50" height="48" rx="7" fill="#2f8cf0" stroke="#1450a8" strokeWidth="2.5" />
-        <path d="M10 5 H46 Q53 5 53 12 V15 H3 V12 Q3 5 10 5Z" fill="#7cc8ff" opacity=".8" />
+        <rect x="3" y="5" width="50" height="48" rx="7" fill="#4c2ff0" stroke="#3614a8" strokeWidth="2.5" />
+        <path d="M10 5 H46 Q53 5 53 12 V15 H3 V12 Q3 5 10 5Z" fill="#837cff" opacity=".8" />
         <MataMarah cx={28} cy={32} />
       </>)}
       {jenis === 'limas' && (<>
@@ -1712,19 +1737,19 @@ function Gerbang({ buka }: { buka: boolean }) {
   return (
     <svg viewBox="0 0 70 85" style={{ width: '100%', height: '100%', overflow: 'visible' }}>
       <defs>
-        <radialGradient id="gPortalG" cx=".5" cy=".5" r=".6"><stop offset="0" stopColor="#fff" /><stop offset=".5" stopColor="#8ff0ff" /><stop offset="1" stopColor="#2f9bff" /></radialGradient>
+        <radialGradient id="gPortalG" cx=".5" cy=".5" r=".6"><stop offset="0" stopColor="#fff" /><stop offset=".5" stopColor="#8fa9ff" /><stop offset="1" stopColor="#472fff" /></radialGradient>
       </defs>
-      {buka && <circle cx="35" cy="48" r="38" fill="#8ff0ff" opacity=".3" />}
-      <path d="M4 85 V35 A31 31 0 0 1 66 35 V85Z" fill="#8f9bb0" stroke="#4d5b75" strokeWidth="3" />
-      {[[10, 60], [10, 44], [58, 60], [58, 44]].map(([x, y]) => <rect key={x + '-' + y} x={x} y={y} width="3" height="12" rx="1" fill="#b6c0d2" />)}
-      <path d="M15 85 V38 A20 20 0 0 1 55 38 V85Z" fill={buka ? 'url(#gPortalG)' : '#6b4a2b'} stroke="#3a4560" strokeWidth="2" />
+      {buka && <circle cx="35" cy="48" r="38" fill="#8fa9ff" opacity=".3" />}
+      <path d="M4 85 V35 A31 31 0 0 1 66 35 V85Z" fill="#988fb0" stroke="#584d75" strokeWidth="3" />
+      {[[10, 60], [10, 44], [58, 60], [58, 44]].map(([x, y]) => <rect key={x + '-' + y} x={x} y={y} width="3" height="12" rx="1" fill="#beb6d2" />)}
+      <path d="M15 85 V38 A20 20 0 0 1 55 38 V85Z" fill={buka ? 'url(#gPortalG)' : '#6b4a2b'} stroke="#473a60" strokeWidth="2" />
       {!buka && (<>
         <path d="M35 20 V85 M15 52 H55 M15 68 H55" stroke="#4a331c" strokeWidth="2" />
         <rect x="27" y="46" width="16" height="14" rx="3" fill="#ffc72a" stroke="#c98a14" strokeWidth="2" />
         <path d="M30 46 V41 A5 5 0 0 1 40 41 V46" fill="none" stroke="#c98a14" strokeWidth="3" />
       </>)}
       {buka && <path d="M35 34 L39 44 L50 45 L42 52 L44 63 L35 57 L26 63 L28 52 L20 45 L31 44Z" fill="#fff" opacity=".9" />}
-      <path d="M12 8 L35 -2 L58 8" fill="none" stroke="#4d5b75" strokeWidth="0" />
+      <path d="M12 8 L35 -2 L58 8" fill="none" stroke="#584d75" strokeWidth="0" />
     </svg>
   )
 }
@@ -1733,7 +1758,7 @@ function Gerbang({ buka }: { buka: boolean }) {
 function MaskotMini({ mood, st }: { mood: 'senang' | 'sedih'; st: CSSProperties }) {
   return (
     <svg viewBox="0 0 100 110" style={{ position: 'absolute', filter: 'drop-shadow(0 1cqw .8cqw rgba(30,60,20,.3))', ...st }}>
-      <rect x="2" y="48" width="26" height="40" rx="9" fill="#2f72dc" stroke="#12378a" strokeWidth="2" />
+      <rect x="2" y="48" width="26" height="40" rx="9" fill="#5a2fdc" stroke="#39128a" strokeWidth="2" />
       <path d="M50 8 L10 92 H90Z" fill="#ffd428" stroke="#ffd428" strokeWidth="12" strokeLinejoin="round" />
       <path d="M50 8 L10 92 H40Z" fill="#e8a400" opacity=".3" />
       <ellipse cx="42" cy="58" rx="8" ry={mood === 'sedih' ? 9 : 10} fill="#fff" stroke="#222" strokeWidth="1.5" />
@@ -1744,7 +1769,7 @@ function MaskotMini({ mood, st }: { mood: 'senang' | 'sedih'; st: CSSProperties 
       ) : (<>
         <path d="M46 83 Q54 72 62 83" fill="none" stroke="#7a1a1a" strokeWidth="2.4" strokeLinecap="round" />
         <path d="M34 48 L48 52 M72 48 L58 52" stroke="#7a4a00" strokeWidth="2.4" strokeLinecap="round" />
-        <path d="M38 70 Q35 76 38 79 Q41 76 38 70Z" fill="#6ec6ff" />
+        <path d="M38 70 Q35 76 38 79 Q41 76 38 70Z" fill="#726eff" />
       </>)}
     </svg>
   )
@@ -1780,12 +1805,12 @@ const Pemandangan = memo(function Pemandangan({ tema }: { tema: TemaKey }) {
   return (
     <svg className="latar-game" viewBox="0 0 100 177.75" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
       {tema === 'pulau' && (<>
-        <defs><linearGradient id="skP" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#3fa6ee" /><stop offset=".6" stopColor="#8fd3fb" /><stop offset="1" stopColor="#d6f2ff" /></linearGradient></defs>
+        <defs><linearGradient id="skP" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#473fee" /><stop offset=".6" stopColor="#8f8ffb" /><stop offset="1" stopColor="#d6d8ff" /></linearGradient></defs>
         <rect width="100" height="177.75" fill="url(#skP)" />
         <circle cx="84" cy="42" r="17" fill="#fff6c0" opacity=".45" /><circle cx="84" cy="42" r="9.5" fill="#fff3a6" />
         <Awan x={16} y={40} s={1} /><Awan x={62} y={64} s={0.8} /><Awan x={30} y={96} s={0.9} /><Awan x={80} y={108} s={0.7} />
-        <rect y="124" width="100" height="30" fill="#2f9ae0" />
-        <path d="M0 124 q6 -2.4 12 0 t12 0 t12 0 t12 0 t12 0 t12 0 t12 0 t12 0 t12 0 V128 H0Z" fill="#6fc4f5" />
+        <rect y="124" width="100" height="30" fill="#342fe0" />
+        <path d="M0 124 q6 -2.4 12 0 t12 0 t12 0 t12 0 t12 0 t12 0 t12 0 t12 0 t12 0 V128 H0Z" fill="#6f6ff5" />
         <path d="M56 124 q16 -24 40 0Z" fill="#4fae4a" /><path d="M68 124 q9 -15 22 0Z" fill="#3a9640" />
         {[10, 90].map((x) => (
           <g key={x} transform={`translate(${x} 146)`}>
@@ -1831,7 +1856,7 @@ const Statis = memo(function Statis({ lv }: { lv: Level }) {
       const n = Math.max(1, Math.floor(r.w / 3.6))
       return (
         <svg key={i} className="duri" viewBox={`0 0 ${n * 3.6} 3.6`} style={{ left: r.x + 'cqw', top: r.y - 3.6 + 'cqw', width: n * 3.6 + 'cqw', height: '3.6cqw' }}>
-          {Array.from({ length: n }, (_, j) => <path key={j} d={`M${j * 3.6} 3.6 L${j * 3.6 + 1.8} 0 L${(j + 1) * 3.6} 3.6Z`} fill="#c9d3e3" stroke="#6e7f99" strokeWidth=".4" strokeLinejoin="round" />)}
+          {Array.from({ length: n }, (_, j) => <path key={j} d={`M${j * 3.6} 3.6 L${j * 3.6 + 1.8} 0 L${(j + 1) * 3.6} 3.6Z`} fill="#cfc9e3" stroke="#786e99" strokeWidth=".4" strokeLinejoin="round" />)}
         </svg>
       )
     })}
@@ -1985,7 +2010,7 @@ function Jelajah({ g, ke }: { g: Konteks; ke: Ke }) {
 
         {S.efek.map((e) => (
           <Ledakan key={e.id} x={e.x} y={e.y} n={e.w === 'koin' ? 6 : 10} r={e.w === 'koin' ? 6 : 11}
-            warna={e.w === 'duar' ? ['#ff7a3c', '#ffd23c', '#ff4d6d'] : ['#ffd23c', '#ffffff', '#7be4ff']} />
+            warna={e.w === 'duar' ? ['#ff7a3c', '#ffd23c', '#ff4d6d'] : ['#ffd23c', '#ffffff', '#7b90ff']} />
         ))}
       </div>
 
@@ -2149,7 +2174,7 @@ function LayarHasil({ g, ke }: { g: Konteks; ke: Ke }) {
 
   return (
     <>
-      <div className="pg" style={{ background: h.lolos ? 'linear-gradient(#6bbcf0, #cdeeff 50%, #7fd16a)' : 'linear-gradient(#7a8fb8, #c9d4ea 50%, #9fb7a0)' }} />
+      <div className="pg" style={{ background: h.lolos ? 'linear-gradient(#6e6bf0, #cdceff 50%, #7fd16a)' : 'linear-gradient(#8c7ab8, #d3c9ea 50%, #9fb7a0)' }} />
       {h.lolos && Array.from({ length: 22 }, (_, i) => (
         <div key={i} className="konfeti" style={{ left: ((i * 37) % 96) + 1 + 'cqw', background: WARNA_KONFETI[i % 5], animationDelay: (i % 7) * 0.18 + 's',
           clipPath: i % 3 === 0 ? 'polygon(50% 0,100% 100%,0 100%)' : undefined, borderRadius: i % 3 === 1 ? '50%' : undefined }} />
@@ -2161,7 +2186,7 @@ function LayarHasil({ g, ke }: { g: Konteks; ke: Ke }) {
           </span>
         ))}
       </div>
-      <div className="kay" style={{ ...a(10, 23, 80, 12), fontSize: '7.5cqw', background: h.lolos ? 'linear-gradient(#3d8ff0, #1b4aa8)' : 'linear-gradient(#e8695f, #b02f2f)', borderColor: h.lolos ? '#0f2a63' : '#7a1c1c', textShadow: '0 .4cqw 0 rgba(0,0,0,.35)' }}>{judul}</div>
+      <div className="kay" style={{ ...a(10, 23, 80, 12), fontSize: '7.5cqw', background: h.lolos ? 'linear-gradient(#5c3df0, #451ba8)' : 'linear-gradient(#e8695f, #b02f2f)', borderColor: h.lolos ? '#290f63' : '#7a1c1c', textShadow: '0 .4cqw 0 rgba(0,0,0,.35)' }}>{judul}</div>
       <MaskotMini mood={h.lolos ? 'senang' : 'sedih'} st={a(35, 37, 30, 33)} />
       <div className="kartu" style={{ position: 'absolute', ...a(8, 74, 84, 60), padding: '3.5cqw 4cqw', display: 'flex', flexDirection: 'column', gap: '2.2cqw', justifyContent: 'center' }}>
         <div style={{ background: h.lolos ? '#e3f7d6' : '#ffe6e2', color: h.lolos ? '#1f7a2a' : '#b02a2a', borderRadius: '2.6cqw', padding: '1.8cqw 3cqw', fontSize: '3.2cqw', fontWeight: 600, textAlign: 'center', lineHeight: 1.25 }}>
@@ -2170,7 +2195,7 @@ function LayarHasil({ g, ke }: { g: Konteks; ke: Ke }) {
             : 'Kamu dapat ' + h.bintang + ' bintang. Butuh minimal ' + BINTANG_LOLOS + ' bintang untuk lanjut. Ulangi soalnya!'}
         </div>
         {baris(<><Bin s={5} />Skor</>, <><span style={{ width: '5cqw', display: 'inline-flex' }}><Koin /></span>{skor}</>)}
-        {baris(<><b style={{ background: '#2f6fd6', color: '#fff', borderRadius: '50%', fontSize: '2.2cqw', padding: '1cqw' }}>XP</b>XP</>, <span style={{ color: '#7a3fc0' }}>+{xp}</span>)}
+        {baris(<><b style={{ background: '#592fd6', color: '#fff', borderRadius: '50%', fontSize: '2.2cqw', padding: '1cqw' }}>XP</b>XP</>, <span style={{ color: '#7a3fc0' }}>+{xp}</span>)}
         {baris(<>Koin di level ini</>, <><span style={{ width: '5cqw', display: 'inline-flex' }}><Koin /></span>{h.koin}</>)}
         {baris(<>Jawaban</>, <><span style={{ width: '5.5cqw', display: 'inline-flex' }}><Centang c="#3bb03a" /></span>{h.benar} benar / {kuis}</>)}
       </div>
@@ -2198,7 +2223,7 @@ function BintangLevel({ n, dapat, total, st }: { n: number; dapat: number; total
   return (
     <div aria-label={'Level ' + n + ': ' + dapat + ' dari ' + total + ' bintang'}
       style={{ position: 'absolute', zIndex: 4, pointerEvents: 'none', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end', gap: '.1cqw',
-        filter: 'drop-shadow(0 .3cqw 0 rgba(8,30,70,.55))', ...st }}>
+        filter: 'drop-shadow(0 .3cqw 0 rgba(25,8,70,.55))', ...st }}>
       {baris.map((r, k) => (
         <div key={k} style={{ display: 'flex', gap: '.2cqw' }}>
           {r.map((i) => <Bin key={i} s={3.2} on={i < dapat} />)}
@@ -2260,9 +2285,9 @@ function Alur({ layar, ke, g }: { layar: string; ke: Ke; g: Konteks }) {
       <>
         <img src={LATAR_PETA} alt="" draggable={false} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', pointerEvents: 'none' }} />
         {/* jalur putih 1 → 15 mengikuti urutan level, plus semak/teratai penutup */}
-        <svg viewBox="0 0 941 1672" preserveAspectRatio="xMidYMid slice" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }} aria-hidden="true"><defs><radialGradient id="aw"><stop offset="0" stop-color="#5fd0f5"/><stop offset=".8" stop-color="#46bdee"/><stop offset="1" stop-color="#46bdee" stop-opacity="0"/></radialGradient><mask id="am"><rect width="941" height="1672" fill="#fff"/><circle cx="150" cy="455" r="44"/><circle cx="285" cy="455" r="44"/><circle cx="395" cy="472" r="44"/></mask></defs><g transform="translate(587 666) scale(1.12)"><ellipse cx="0" cy="26" rx="52" ry="13" fill="#1e5a1e" opacity=".35"/><circle cx="-26" cy="8" r="26" fill="#2f8a2a"/><circle cx="26" cy="8" r="26" fill="#2f8a2a"/><circle cx="0" cy="-6" r="32" fill="#3fa534"/><circle cx="-24" cy="4" r="20" fill="#49b53c"/><circle cx="24" cy="4" r="20" fill="#49b53c"/><circle cx="0" cy="-10" r="24" fill="#5cc944"/><circle cx="-8" cy="-20" r="11" fill="#86dc57" opacity=".85"/><circle cx="20" cy="-6" r="7" fill="#86dc57" opacity=".8"/><circle cx="-28" cy="2" r="6" fill="#86dc57" opacity=".7"/><circle cx="-26" cy="-4" r="4.5" fill="#ffe14d" stroke="#2f6a2a" stroke-width="1"/><circle cx="12" cy="-24" r="4.5" fill="#ff8fb1" stroke="#2f6a2a" stroke-width="1"/><circle cx="-6" cy="-28" r="4.5" fill="#ffffff" stroke="#2f6a2a" stroke-width="1"/><circle cx="28" cy="6" r="4.5" fill="#ffe14d" stroke="#2f6a2a" stroke-width="1"/></g><g transform="translate(710 692) scale(1.12)"><ellipse cx="0" cy="26" rx="52" ry="13" fill="#1e5a1e" opacity=".35"/><circle cx="-26" cy="8" r="26" fill="#2f8a2a"/><circle cx="26" cy="8" r="26" fill="#2f8a2a"/><circle cx="0" cy="-6" r="32" fill="#3fa534"/><circle cx="-24" cy="4" r="20" fill="#49b53c"/><circle cx="24" cy="4" r="20" fill="#49b53c"/><circle cx="0" cy="-10" r="24" fill="#5cc944"/><circle cx="-8" cy="-20" r="11" fill="#86dc57" opacity=".85"/><circle cx="20" cy="-6" r="7" fill="#86dc57" opacity=".8"/><circle cx="-28" cy="2" r="6" fill="#86dc57" opacity=".7"/><circle cx="-24" cy="-6" r="4.5" fill="#ff8fb1" stroke="#2f6a2a" stroke-width="1"/><circle cx="14" cy="-22" r="4.5" fill="#ffe14d" stroke="#2f6a2a" stroke-width="1"/><circle cx="26" cy="4" r="4.5" fill="#ffffff" stroke="#2f6a2a" stroke-width="1"/><circle cx="2" cy="-30" r="4.5" fill="#ff8fb1" stroke="#2f6a2a" stroke-width="1"/></g><g transform="translate(830 692) scale(1.12)"><ellipse cx="0" cy="26" rx="52" ry="13" fill="#1e5a1e" opacity=".35"/><circle cx="-26" cy="8" r="26" fill="#2f8a2a"/><circle cx="26" cy="8" r="26" fill="#2f8a2a"/><circle cx="0" cy="-6" r="32" fill="#3fa534"/><circle cx="-24" cy="4" r="20" fill="#49b53c"/><circle cx="24" cy="4" r="20" fill="#49b53c"/><circle cx="0" cy="-10" r="24" fill="#5cc944"/><circle cx="-8" cy="-20" r="11" fill="#86dc57" opacity=".85"/><circle cx="20" cy="-6" r="7" fill="#86dc57" opacity=".8"/><circle cx="-28" cy="2" r="6" fill="#86dc57" opacity=".7"/><circle cx="-26" cy="-4" r="4.5" fill="#ffe14d" stroke="#2f6a2a" stroke-width="1"/><circle cx="12" cy="-24" r="4.5" fill="#ff8fb1" stroke="#2f6a2a" stroke-width="1"/><circle cx="-6" cy="-28" r="4.5" fill="#ffffff" stroke="#2f6a2a" stroke-width="1"/><circle cx="28" cy="6" r="4.5" fill="#ffe14d" stroke="#2f6a2a" stroke-width="1"/></g><g transform="translate(176 992) scale(1.12)"><ellipse cx="0" cy="26" rx="52" ry="13" fill="#1e5a1e" opacity=".35"/><circle cx="-26" cy="8" r="26" fill="#2f8a2a"/><circle cx="26" cy="8" r="26" fill="#2f8a2a"/><circle cx="0" cy="-6" r="32" fill="#3fa534"/><circle cx="-24" cy="4" r="20" fill="#49b53c"/><circle cx="24" cy="4" r="20" fill="#49b53c"/><circle cx="0" cy="-10" r="24" fill="#5cc944"/><circle cx="-8" cy="-20" r="11" fill="#86dc57" opacity=".85"/><circle cx="20" cy="-6" r="7" fill="#86dc57" opacity=".8"/><circle cx="-28" cy="2" r="6" fill="#86dc57" opacity=".7"/><circle cx="-24" cy="-6" r="4.5" fill="#ff8fb1" stroke="#2f6a2a" stroke-width="1"/><circle cx="14" cy="-22" r="4.5" fill="#ffe14d" stroke="#2f6a2a" stroke-width="1"/><circle cx="26" cy="4" r="4.5" fill="#ffffff" stroke="#2f6a2a" stroke-width="1"/><circle cx="2" cy="-30" r="4.5" fill="#ff8fb1" stroke="#2f6a2a" stroke-width="1"/></g><g transform="translate(274 987) scale(1.12)"><ellipse cx="0" cy="26" rx="52" ry="13" fill="#1e5a1e" opacity=".35"/><circle cx="-26" cy="8" r="26" fill="#2f8a2a"/><circle cx="26" cy="8" r="26" fill="#2f8a2a"/><circle cx="0" cy="-6" r="32" fill="#3fa534"/><circle cx="-24" cy="4" r="20" fill="#49b53c"/><circle cx="24" cy="4" r="20" fill="#49b53c"/><circle cx="0" cy="-10" r="24" fill="#5cc944"/><circle cx="-8" cy="-20" r="11" fill="#86dc57" opacity=".85"/><circle cx="20" cy="-6" r="7" fill="#86dc57" opacity=".8"/><circle cx="-28" cy="2" r="6" fill="#86dc57" opacity=".7"/><circle cx="-26" cy="-4" r="4.5" fill="#ffe14d" stroke="#2f6a2a" stroke-width="1"/><circle cx="12" cy="-24" r="4.5" fill="#ff8fb1" stroke="#2f6a2a" stroke-width="1"/><circle cx="-6" cy="-28" r="4.5" fill="#ffffff" stroke="#2f6a2a" stroke-width="1"/><circle cx="28" cy="6" r="4.5" fill="#ffe14d" stroke="#2f6a2a" stroke-width="1"/></g><g transform="translate(376 986) scale(1.12)"><ellipse cx="0" cy="26" rx="52" ry="13" fill="#1e5a1e" opacity=".35"/><circle cx="-26" cy="8" r="26" fill="#2f8a2a"/><circle cx="26" cy="8" r="26" fill="#2f8a2a"/><circle cx="0" cy="-6" r="32" fill="#3fa534"/><circle cx="-24" cy="4" r="20" fill="#49b53c"/><circle cx="24" cy="4" r="20" fill="#49b53c"/><circle cx="0" cy="-10" r="24" fill="#5cc944"/><circle cx="-8" cy="-20" r="11" fill="#86dc57" opacity=".85"/><circle cx="20" cy="-6" r="7" fill="#86dc57" opacity=".8"/><circle cx="-28" cy="2" r="6" fill="#86dc57" opacity=".7"/><circle cx="-24" cy="-6" r="4.5" fill="#ff8fb1" stroke="#2f6a2a" stroke-width="1"/><circle cx="14" cy="-22" r="4.5" fill="#ffe14d" stroke="#2f6a2a" stroke-width="1"/><circle cx="26" cy="4" r="4.5" fill="#ffffff" stroke="#2f6a2a" stroke-width="1"/><circle cx="2" cy="-30" r="4.5" fill="#ff8fb1" stroke="#2f6a2a" stroke-width="1"/></g><g transform="translate(392 1409) scale(1.12)"><ellipse cx="0" cy="26" rx="52" ry="13" fill="#1e5a1e" opacity=".35"/><circle cx="-26" cy="8" r="26" fill="#2f8a2a"/><circle cx="26" cy="8" r="26" fill="#2f8a2a"/><circle cx="0" cy="-6" r="32" fill="#3fa534"/><circle cx="-24" cy="4" r="20" fill="#49b53c"/><circle cx="24" cy="4" r="20" fill="#49b53c"/><circle cx="0" cy="-10" r="24" fill="#5cc944"/><circle cx="-8" cy="-20" r="11" fill="#86dc57" opacity=".85"/><circle cx="20" cy="-6" r="7" fill="#86dc57" opacity=".8"/><circle cx="-28" cy="2" r="6" fill="#86dc57" opacity=".7"/><circle cx="-26" cy="-4" r="4.5" fill="#ffe14d" stroke="#2f6a2a" stroke-width="1"/><circle cx="12" cy="-24" r="4.5" fill="#ff8fb1" stroke="#2f6a2a" stroke-width="1"/><circle cx="-6" cy="-28" r="4.5" fill="#ffffff" stroke="#2f6a2a" stroke-width="1"/><circle cx="28" cy="6" r="4.5" fill="#ffe14d" stroke="#2f6a2a" stroke-width="1"/></g><g transform="translate(478 1415) scale(1.12)"><ellipse cx="0" cy="26" rx="52" ry="13" fill="#1e5a1e" opacity=".35"/><circle cx="-26" cy="8" r="26" fill="#2f8a2a"/><circle cx="26" cy="8" r="26" fill="#2f8a2a"/><circle cx="0" cy="-6" r="32" fill="#3fa534"/><circle cx="-24" cy="4" r="20" fill="#49b53c"/><circle cx="24" cy="4" r="20" fill="#49b53c"/><circle cx="0" cy="-10" r="24" fill="#5cc944"/><circle cx="-8" cy="-20" r="11" fill="#86dc57" opacity=".85"/><circle cx="20" cy="-6" r="7" fill="#86dc57" opacity=".8"/><circle cx="-28" cy="2" r="6" fill="#86dc57" opacity=".7"/><circle cx="-24" cy="-6" r="4.5" fill="#ff8fb1" stroke="#2f6a2a" stroke-width="1"/><circle cx="14" cy="-22" r="4.5" fill="#ffe14d" stroke="#2f6a2a" stroke-width="1"/><circle cx="26" cy="4" r="4.5" fill="#ffffff" stroke="#2f6a2a" stroke-width="1"/><circle cx="2" cy="-30" r="4.5" fill="#ff8fb1" stroke="#2f6a2a" stroke-width="1"/></g><g transform="translate(568 1414) scale(1.12)"><ellipse cx="0" cy="26" rx="52" ry="13" fill="#1e5a1e" opacity=".35"/><circle cx="-26" cy="8" r="26" fill="#2f8a2a"/><circle cx="26" cy="8" r="26" fill="#2f8a2a"/><circle cx="0" cy="-6" r="32" fill="#3fa534"/><circle cx="-24" cy="4" r="20" fill="#49b53c"/><circle cx="24" cy="4" r="20" fill="#49b53c"/><circle cx="0" cy="-10" r="24" fill="#5cc944"/><circle cx="-8" cy="-20" r="11" fill="#86dc57" opacity=".85"/><circle cx="20" cy="-6" r="7" fill="#86dc57" opacity=".8"/><circle cx="-28" cy="2" r="6" fill="#86dc57" opacity=".7"/><circle cx="-26" cy="-4" r="4.5" fill="#ffe14d" stroke="#2f6a2a" stroke-width="1"/><circle cx="12" cy="-24" r="4.5" fill="#ff8fb1" stroke="#2f6a2a" stroke-width="1"/><circle cx="-6" cy="-28" r="4.5" fill="#ffffff" stroke="#2f6a2a" stroke-width="1"/><circle cx="28" cy="6" r="4.5" fill="#ffe14d" stroke="#2f6a2a" stroke-width="1"/></g><g transform="translate(652 1103)"><ellipse cx="0" cy="0" rx="58" ry="48" fill="url(#aw)"/><ellipse cx="0" cy="4" rx="44" ry="30" fill="none" stroke="#bdeeff" stroke-width="2" opacity=".55"/><g transform="translate(0 6) scale(1 .66)"><path d="M-16.0 2.0 L8.1 11.7 A26 26 0 1 1 8.1 -7.7 Z" fill="#37b552" stroke="#1c6e33" stroke-width="2"/><path d="M-16.0 2.0 L-31.6 -5.8" stroke="#7bdc7a" stroke-width="1.5" opacity=".7"/></g><g transform="translate(0 6) scale(1 .66) rotate(200)"><path d="M18.0 8.0 L36.5 15.5 A20 20 0 1 1 36.5 0.5 Z" fill="#37b552" stroke="#1c6e33" stroke-width="2"/><path d="M18.0 8.0 L6.0 2.0" stroke="#7bdc7a" stroke-width="1.5" opacity=".7"/></g><g transform="translate(8 -6)"><path d="M-11 4 Q-13 -11 0 -15 Q13 -11 11 4 Q0 9 -11 4Z" fill="#ff8fb1" stroke="#c4527a" stroke-width="1.5"/><path d="M-5 4 Q-6 -9 0 -13 Q6 -9 5 4Z" fill="#ffc2d6"/><circle cx="0" cy="-3" r="3" fill="#ffe14d"/></g></g><g transform="translate(756 1109)"><ellipse cx="0" cy="0" rx="58" ry="48" fill="url(#aw)"/><ellipse cx="0" cy="4" rx="44" ry="30" fill="none" stroke="#bdeeff" stroke-width="2" opacity=".55"/><g transform="translate(0 6) scale(1 .66)"><path d="M-16.0 2.0 L8.1 11.7 A26 26 0 1 1 8.1 -7.7 Z" fill="#37b552" stroke="#1c6e33" stroke-width="2"/><path d="M-16.0 2.0 L-31.6 -5.8" stroke="#7bdc7a" stroke-width="1.5" opacity=".7"/></g><g transform="translate(0 6) scale(1 .66) rotate(150)"><path d="M18.0 8.0 L36.5 15.5 A20 20 0 1 1 36.5 0.5 Z" fill="#37b552" stroke="#1c6e33" stroke-width="2"/><path d="M18.0 8.0 L6.0 2.0" stroke="#7bdc7a" stroke-width="1.5" opacity=".7"/></g><g transform="translate(-6 -6)"><path d="M-11 4 Q-13 -11 0 -15 Q13 -11 11 4 Q0 9 -11 4Z" fill="#ff8fb1" stroke="#c4527a" stroke-width="1.5"/><path d="M-5 4 Q-6 -9 0 -13 Q6 -9 5 4Z" fill="#ffc2d6"/><circle cx="0" cy="-3" r="3" fill="#ffe14d"/></g></g><g transform="translate(850 1102)"><ellipse cx="0" cy="0" rx="58" ry="48" fill="url(#aw)"/><ellipse cx="0" cy="4" rx="44" ry="30" fill="none" stroke="#bdeeff" stroke-width="2" opacity=".55"/><g transform="translate(0 6) scale(1 .66)"><path d="M-16.0 2.0 L8.1 11.7 A26 26 0 1 1 8.1 -7.7 Z" fill="#37b552" stroke="#1c6e33" stroke-width="2"/><path d="M-16.0 2.0 L-31.6 -5.8" stroke="#7bdc7a" stroke-width="1.5" opacity=".7"/></g><g transform="translate(0 6) scale(1 .66) rotate(200)"><path d="M18.0 8.0 L36.5 15.5 A20 20 0 1 1 36.5 0.5 Z" fill="#37b552" stroke="#1c6e33" stroke-width="2"/><path d="M18.0 8.0 L6.0 2.0" stroke="#7bdc7a" stroke-width="1.5" opacity=".7"/></g><g transform="translate(8 -6)"><path d="M-11 4 Q-13 -11 0 -15 Q13 -11 11 4 Q0 9 -11 4Z" fill="#ff8fb1" stroke="#c4527a" stroke-width="1.5"/><path d="M-5 4 Q-6 -9 0 -13 Q6 -9 5 4Z" fill="#ffc2d6"/><circle cx="0" cy="-3" r="3" fill="#ffe14d"/></g></g><g mask="url(#am)" fill="none" strokeLinecap="round" strokeLinejoin="round"><path d="M150 455 C159 454 182 452 205 452 C228 452 262 453 285 455 C308 457 322 459 340 462 C358 465 378 467 395 472 C412 477 427 479 440 490 C453 501 466 522 472 540 C478 558 468 586 478 600 C488 614 512 624 530 625 C548 626 570 615 585 605 C600 595 608 570 620 567 C632 564 648 579 660 585 C672 591 681 598 695 602 C709 606 729 609 745 610 C761 611 784 600 790 607 C796 614 793 640 778 650 C763 660 726 661 700 668 C674 675 647 684 620 690 C593 696 563 700 540 702 C517 704 497 697 480 703 C463 709 446 724 440 740 C434 756 452 784 445 800 C438 816 424 829 400 835 C376 841 331 832 300 835 C269 838 237 841 215 850 C193 859 166 880 168 887 C170 894 206 895 225 895 C244 895 266 888 285 887 C304 886 322 888 340 890 C358 892 377 898 395 901 C413 904 434 898 450 905 C466 912 478 928 490 940 C502 952 508 965 520 975 C532 985 542 993 560 1000 C578 1007 609 1014 629 1019 C649 1024 663 1030 680 1033 C697 1036 714 1036 731 1037 C748 1038 768 1040 785 1038 C802 1036 820 1021 834 1026 C848 1031 871 1054 872 1070 C873 1086 854 1106 840 1120 C826 1134 806 1142 790 1152 C774 1162 756 1167 745 1180 C734 1193 732 1213 725 1230 C718 1247 717 1261 705 1280 C693 1299 672 1334 655 1345 C638 1356 616 1347 600 1345 C584 1343 576 1335 562 1335 C548 1335 530 1345 515 1345 C500 1345 486 1338 472 1336 C458 1334 444 1331 430 1330 C416 1329 393 1328 386 1328" stroke="#14336b" strokeOpacity=".38" strokeWidth="13" strokeDasharray="11 25" transform="translate(0 3)"/><path d="M150 455 C159 454 182 452 205 452 C228 452 262 453 285 455 C308 457 322 459 340 462 C358 465 378 467 395 472 C412 477 427 479 440 490 C453 501 466 522 472 540 C478 558 468 586 478 600 C488 614 512 624 530 625 C548 626 570 615 585 605 C600 595 608 570 620 567 C632 564 648 579 660 585 C672 591 681 598 695 602 C709 606 729 609 745 610 C761 611 784 600 790 607 C796 614 793 640 778 650 C763 660 726 661 700 668 C674 675 647 684 620 690 C593 696 563 700 540 702 C517 704 497 697 480 703 C463 709 446 724 440 740 C434 756 452 784 445 800 C438 816 424 829 400 835 C376 841 331 832 300 835 C269 838 237 841 215 850 C193 859 166 880 168 887 C170 894 206 895 225 895 C244 895 266 888 285 887 C304 886 322 888 340 890 C358 892 377 898 395 901 C413 904 434 898 450 905 C466 912 478 928 490 940 C502 952 508 965 520 975 C532 985 542 993 560 1000 C578 1007 609 1014 629 1019 C649 1024 663 1030 680 1033 C697 1036 714 1036 731 1037 C748 1038 768 1040 785 1038 C802 1036 820 1021 834 1026 C848 1031 871 1054 872 1070 C873 1086 854 1106 840 1120 C826 1134 806 1142 790 1152 C774 1162 756 1167 745 1180 C734 1193 732 1213 725 1230 C718 1247 717 1261 705 1280 C693 1299 672 1334 655 1345 C638 1356 616 1347 600 1345 C584 1343 576 1335 562 1335 C548 1335 530 1345 515 1345 C500 1345 486 1338 472 1336 C458 1334 444 1331 430 1330 C416 1329 393 1328 386 1328" stroke="#ffffff" strokeWidth="10" strokeDasharray="11 25"/></g></svg>
+        <svg viewBox="0 0 941 1672" preserveAspectRatio="xMidYMid slice" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }} aria-hidden="true"><defs><radialGradient id="aw"><stop offset="0" stop-color="#5f71f5"/><stop offset=".8" stop-color="#4653ee"/><stop offset="1" stop-color="#4653ee" stop-opacity="0"/></radialGradient><mask id="am"><rect width="941" height="1672" fill="#fff"/><circle cx="150" cy="455" r="44"/><circle cx="285" cy="455" r="44"/><circle cx="395" cy="472" r="44"/></mask></defs><g transform="translate(587 666) scale(1.12)"><ellipse cx="0" cy="26" rx="52" ry="13" fill="#1e5a1e" opacity=".35"/><circle cx="-26" cy="8" r="26" fill="#2f8a2a"/><circle cx="26" cy="8" r="26" fill="#2f8a2a"/><circle cx="0" cy="-6" r="32" fill="#3fa534"/><circle cx="-24" cy="4" r="20" fill="#49b53c"/><circle cx="24" cy="4" r="20" fill="#49b53c"/><circle cx="0" cy="-10" r="24" fill="#5cc944"/><circle cx="-8" cy="-20" r="11" fill="#86dc57" opacity=".85"/><circle cx="20" cy="-6" r="7" fill="#86dc57" opacity=".8"/><circle cx="-28" cy="2" r="6" fill="#86dc57" opacity=".7"/><circle cx="-26" cy="-4" r="4.5" fill="#ffe14d" stroke="#2f6a2a" stroke-width="1"/><circle cx="12" cy="-24" r="4.5" fill="#ff8fb1" stroke="#2f6a2a" stroke-width="1"/><circle cx="-6" cy="-28" r="4.5" fill="#ffffff" stroke="#2f6a2a" stroke-width="1"/><circle cx="28" cy="6" r="4.5" fill="#ffe14d" stroke="#2f6a2a" stroke-width="1"/></g><g transform="translate(710 692) scale(1.12)"><ellipse cx="0" cy="26" rx="52" ry="13" fill="#1e5a1e" opacity=".35"/><circle cx="-26" cy="8" r="26" fill="#2f8a2a"/><circle cx="26" cy="8" r="26" fill="#2f8a2a"/><circle cx="0" cy="-6" r="32" fill="#3fa534"/><circle cx="-24" cy="4" r="20" fill="#49b53c"/><circle cx="24" cy="4" r="20" fill="#49b53c"/><circle cx="0" cy="-10" r="24" fill="#5cc944"/><circle cx="-8" cy="-20" r="11" fill="#86dc57" opacity=".85"/><circle cx="20" cy="-6" r="7" fill="#86dc57" opacity=".8"/><circle cx="-28" cy="2" r="6" fill="#86dc57" opacity=".7"/><circle cx="-24" cy="-6" r="4.5" fill="#ff8fb1" stroke="#2f6a2a" stroke-width="1"/><circle cx="14" cy="-22" r="4.5" fill="#ffe14d" stroke="#2f6a2a" stroke-width="1"/><circle cx="26" cy="4" r="4.5" fill="#ffffff" stroke="#2f6a2a" stroke-width="1"/><circle cx="2" cy="-30" r="4.5" fill="#ff8fb1" stroke="#2f6a2a" stroke-width="1"/></g><g transform="translate(830 692) scale(1.12)"><ellipse cx="0" cy="26" rx="52" ry="13" fill="#1e5a1e" opacity=".35"/><circle cx="-26" cy="8" r="26" fill="#2f8a2a"/><circle cx="26" cy="8" r="26" fill="#2f8a2a"/><circle cx="0" cy="-6" r="32" fill="#3fa534"/><circle cx="-24" cy="4" r="20" fill="#49b53c"/><circle cx="24" cy="4" r="20" fill="#49b53c"/><circle cx="0" cy="-10" r="24" fill="#5cc944"/><circle cx="-8" cy="-20" r="11" fill="#86dc57" opacity=".85"/><circle cx="20" cy="-6" r="7" fill="#86dc57" opacity=".8"/><circle cx="-28" cy="2" r="6" fill="#86dc57" opacity=".7"/><circle cx="-26" cy="-4" r="4.5" fill="#ffe14d" stroke="#2f6a2a" stroke-width="1"/><circle cx="12" cy="-24" r="4.5" fill="#ff8fb1" stroke="#2f6a2a" stroke-width="1"/><circle cx="-6" cy="-28" r="4.5" fill="#ffffff" stroke="#2f6a2a" stroke-width="1"/><circle cx="28" cy="6" r="4.5" fill="#ffe14d" stroke="#2f6a2a" stroke-width="1"/></g><g transform="translate(176 992) scale(1.12)"><ellipse cx="0" cy="26" rx="52" ry="13" fill="#1e5a1e" opacity=".35"/><circle cx="-26" cy="8" r="26" fill="#2f8a2a"/><circle cx="26" cy="8" r="26" fill="#2f8a2a"/><circle cx="0" cy="-6" r="32" fill="#3fa534"/><circle cx="-24" cy="4" r="20" fill="#49b53c"/><circle cx="24" cy="4" r="20" fill="#49b53c"/><circle cx="0" cy="-10" r="24" fill="#5cc944"/><circle cx="-8" cy="-20" r="11" fill="#86dc57" opacity=".85"/><circle cx="20" cy="-6" r="7" fill="#86dc57" opacity=".8"/><circle cx="-28" cy="2" r="6" fill="#86dc57" opacity=".7"/><circle cx="-24" cy="-6" r="4.5" fill="#ff8fb1" stroke="#2f6a2a" stroke-width="1"/><circle cx="14" cy="-22" r="4.5" fill="#ffe14d" stroke="#2f6a2a" stroke-width="1"/><circle cx="26" cy="4" r="4.5" fill="#ffffff" stroke="#2f6a2a" stroke-width="1"/><circle cx="2" cy="-30" r="4.5" fill="#ff8fb1" stroke="#2f6a2a" stroke-width="1"/></g><g transform="translate(274 987) scale(1.12)"><ellipse cx="0" cy="26" rx="52" ry="13" fill="#1e5a1e" opacity=".35"/><circle cx="-26" cy="8" r="26" fill="#2f8a2a"/><circle cx="26" cy="8" r="26" fill="#2f8a2a"/><circle cx="0" cy="-6" r="32" fill="#3fa534"/><circle cx="-24" cy="4" r="20" fill="#49b53c"/><circle cx="24" cy="4" r="20" fill="#49b53c"/><circle cx="0" cy="-10" r="24" fill="#5cc944"/><circle cx="-8" cy="-20" r="11" fill="#86dc57" opacity=".85"/><circle cx="20" cy="-6" r="7" fill="#86dc57" opacity=".8"/><circle cx="-28" cy="2" r="6" fill="#86dc57" opacity=".7"/><circle cx="-26" cy="-4" r="4.5" fill="#ffe14d" stroke="#2f6a2a" stroke-width="1"/><circle cx="12" cy="-24" r="4.5" fill="#ff8fb1" stroke="#2f6a2a" stroke-width="1"/><circle cx="-6" cy="-28" r="4.5" fill="#ffffff" stroke="#2f6a2a" stroke-width="1"/><circle cx="28" cy="6" r="4.5" fill="#ffe14d" stroke="#2f6a2a" stroke-width="1"/></g><g transform="translate(376 986) scale(1.12)"><ellipse cx="0" cy="26" rx="52" ry="13" fill="#1e5a1e" opacity=".35"/><circle cx="-26" cy="8" r="26" fill="#2f8a2a"/><circle cx="26" cy="8" r="26" fill="#2f8a2a"/><circle cx="0" cy="-6" r="32" fill="#3fa534"/><circle cx="-24" cy="4" r="20" fill="#49b53c"/><circle cx="24" cy="4" r="20" fill="#49b53c"/><circle cx="0" cy="-10" r="24" fill="#5cc944"/><circle cx="-8" cy="-20" r="11" fill="#86dc57" opacity=".85"/><circle cx="20" cy="-6" r="7" fill="#86dc57" opacity=".8"/><circle cx="-28" cy="2" r="6" fill="#86dc57" opacity=".7"/><circle cx="-24" cy="-6" r="4.5" fill="#ff8fb1" stroke="#2f6a2a" stroke-width="1"/><circle cx="14" cy="-22" r="4.5" fill="#ffe14d" stroke="#2f6a2a" stroke-width="1"/><circle cx="26" cy="4" r="4.5" fill="#ffffff" stroke="#2f6a2a" stroke-width="1"/><circle cx="2" cy="-30" r="4.5" fill="#ff8fb1" stroke="#2f6a2a" stroke-width="1"/></g><g transform="translate(392 1409) scale(1.12)"><ellipse cx="0" cy="26" rx="52" ry="13" fill="#1e5a1e" opacity=".35"/><circle cx="-26" cy="8" r="26" fill="#2f8a2a"/><circle cx="26" cy="8" r="26" fill="#2f8a2a"/><circle cx="0" cy="-6" r="32" fill="#3fa534"/><circle cx="-24" cy="4" r="20" fill="#49b53c"/><circle cx="24" cy="4" r="20" fill="#49b53c"/><circle cx="0" cy="-10" r="24" fill="#5cc944"/><circle cx="-8" cy="-20" r="11" fill="#86dc57" opacity=".85"/><circle cx="20" cy="-6" r="7" fill="#86dc57" opacity=".8"/><circle cx="-28" cy="2" r="6" fill="#86dc57" opacity=".7"/><circle cx="-26" cy="-4" r="4.5" fill="#ffe14d" stroke="#2f6a2a" stroke-width="1"/><circle cx="12" cy="-24" r="4.5" fill="#ff8fb1" stroke="#2f6a2a" stroke-width="1"/><circle cx="-6" cy="-28" r="4.5" fill="#ffffff" stroke="#2f6a2a" stroke-width="1"/><circle cx="28" cy="6" r="4.5" fill="#ffe14d" stroke="#2f6a2a" stroke-width="1"/></g><g transform="translate(478 1415) scale(1.12)"><ellipse cx="0" cy="26" rx="52" ry="13" fill="#1e5a1e" opacity=".35"/><circle cx="-26" cy="8" r="26" fill="#2f8a2a"/><circle cx="26" cy="8" r="26" fill="#2f8a2a"/><circle cx="0" cy="-6" r="32" fill="#3fa534"/><circle cx="-24" cy="4" r="20" fill="#49b53c"/><circle cx="24" cy="4" r="20" fill="#49b53c"/><circle cx="0" cy="-10" r="24" fill="#5cc944"/><circle cx="-8" cy="-20" r="11" fill="#86dc57" opacity=".85"/><circle cx="20" cy="-6" r="7" fill="#86dc57" opacity=".8"/><circle cx="-28" cy="2" r="6" fill="#86dc57" opacity=".7"/><circle cx="-24" cy="-6" r="4.5" fill="#ff8fb1" stroke="#2f6a2a" stroke-width="1"/><circle cx="14" cy="-22" r="4.5" fill="#ffe14d" stroke="#2f6a2a" stroke-width="1"/><circle cx="26" cy="4" r="4.5" fill="#ffffff" stroke="#2f6a2a" stroke-width="1"/><circle cx="2" cy="-30" r="4.5" fill="#ff8fb1" stroke="#2f6a2a" stroke-width="1"/></g><g transform="translate(568 1414) scale(1.12)"><ellipse cx="0" cy="26" rx="52" ry="13" fill="#1e5a1e" opacity=".35"/><circle cx="-26" cy="8" r="26" fill="#2f8a2a"/><circle cx="26" cy="8" r="26" fill="#2f8a2a"/><circle cx="0" cy="-6" r="32" fill="#3fa534"/><circle cx="-24" cy="4" r="20" fill="#49b53c"/><circle cx="24" cy="4" r="20" fill="#49b53c"/><circle cx="0" cy="-10" r="24" fill="#5cc944"/><circle cx="-8" cy="-20" r="11" fill="#86dc57" opacity=".85"/><circle cx="20" cy="-6" r="7" fill="#86dc57" opacity=".8"/><circle cx="-28" cy="2" r="6" fill="#86dc57" opacity=".7"/><circle cx="-26" cy="-4" r="4.5" fill="#ffe14d" stroke="#2f6a2a" stroke-width="1"/><circle cx="12" cy="-24" r="4.5" fill="#ff8fb1" stroke="#2f6a2a" stroke-width="1"/><circle cx="-6" cy="-28" r="4.5" fill="#ffffff" stroke="#2f6a2a" stroke-width="1"/><circle cx="28" cy="6" r="4.5" fill="#ffe14d" stroke="#2f6a2a" stroke-width="1"/></g><g transform="translate(652 1103)"><ellipse cx="0" cy="0" rx="58" ry="48" fill="url(#aw)"/><ellipse cx="0" cy="4" rx="44" ry="30" fill="none" stroke="#bdc4ff" stroke-width="2" opacity=".55"/><g transform="translate(0 6) scale(1 .66)"><path d="M-16.0 2.0 L8.1 11.7 A26 26 0 1 1 8.1 -7.7 Z" fill="#37b552" stroke="#1c6e33" stroke-width="2"/><path d="M-16.0 2.0 L-31.6 -5.8" stroke="#7bdc7a" stroke-width="1.5" opacity=".7"/></g><g transform="translate(0 6) scale(1 .66) rotate(200)"><path d="M18.0 8.0 L36.5 15.5 A20 20 0 1 1 36.5 0.5 Z" fill="#37b552" stroke="#1c6e33" stroke-width="2"/><path d="M18.0 8.0 L6.0 2.0" stroke="#7bdc7a" stroke-width="1.5" opacity=".7"/></g><g transform="translate(8 -6)"><path d="M-11 4 Q-13 -11 0 -15 Q13 -11 11 4 Q0 9 -11 4Z" fill="#ff8fb1" stroke="#c4527a" stroke-width="1.5"/><path d="M-5 4 Q-6 -9 0 -13 Q6 -9 5 4Z" fill="#ffc2d6"/><circle cx="0" cy="-3" r="3" fill="#ffe14d"/></g></g><g transform="translate(756 1109)"><ellipse cx="0" cy="0" rx="58" ry="48" fill="url(#aw)"/><ellipse cx="0" cy="4" rx="44" ry="30" fill="none" stroke="#bdc4ff" stroke-width="2" opacity=".55"/><g transform="translate(0 6) scale(1 .66)"><path d="M-16.0 2.0 L8.1 11.7 A26 26 0 1 1 8.1 -7.7 Z" fill="#37b552" stroke="#1c6e33" stroke-width="2"/><path d="M-16.0 2.0 L-31.6 -5.8" stroke="#7bdc7a" stroke-width="1.5" opacity=".7"/></g><g transform="translate(0 6) scale(1 .66) rotate(150)"><path d="M18.0 8.0 L36.5 15.5 A20 20 0 1 1 36.5 0.5 Z" fill="#37b552" stroke="#1c6e33" stroke-width="2"/><path d="M18.0 8.0 L6.0 2.0" stroke="#7bdc7a" stroke-width="1.5" opacity=".7"/></g><g transform="translate(-6 -6)"><path d="M-11 4 Q-13 -11 0 -15 Q13 -11 11 4 Q0 9 -11 4Z" fill="#ff8fb1" stroke="#c4527a" stroke-width="1.5"/><path d="M-5 4 Q-6 -9 0 -13 Q6 -9 5 4Z" fill="#ffc2d6"/><circle cx="0" cy="-3" r="3" fill="#ffe14d"/></g></g><g transform="translate(850 1102)"><ellipse cx="0" cy="0" rx="58" ry="48" fill="url(#aw)"/><ellipse cx="0" cy="4" rx="44" ry="30" fill="none" stroke="#bdc4ff" stroke-width="2" opacity=".55"/><g transform="translate(0 6) scale(1 .66)"><path d="M-16.0 2.0 L8.1 11.7 A26 26 0 1 1 8.1 -7.7 Z" fill="#37b552" stroke="#1c6e33" stroke-width="2"/><path d="M-16.0 2.0 L-31.6 -5.8" stroke="#7bdc7a" stroke-width="1.5" opacity=".7"/></g><g transform="translate(0 6) scale(1 .66) rotate(200)"><path d="M18.0 8.0 L36.5 15.5 A20 20 0 1 1 36.5 0.5 Z" fill="#37b552" stroke="#1c6e33" stroke-width="2"/><path d="M18.0 8.0 L6.0 2.0" stroke="#7bdc7a" stroke-width="1.5" opacity=".7"/></g><g transform="translate(8 -6)"><path d="M-11 4 Q-13 -11 0 -15 Q13 -11 11 4 Q0 9 -11 4Z" fill="#ff8fb1" stroke="#c4527a" stroke-width="1.5"/><path d="M-5 4 Q-6 -9 0 -13 Q6 -9 5 4Z" fill="#ffc2d6"/><circle cx="0" cy="-3" r="3" fill="#ffe14d"/></g></g><g mask="url(#am)" fill="none" strokeLinecap="round" strokeLinejoin="round"><path d="M150 455 C159 454 182 452 205 452 C228 452 262 453 285 455 C308 457 322 459 340 462 C358 465 378 467 395 472 C412 477 427 479 440 490 C453 501 466 522 472 540 C478 558 468 586 478 600 C488 614 512 624 530 625 C548 626 570 615 585 605 C600 595 608 570 620 567 C632 564 648 579 660 585 C672 591 681 598 695 602 C709 606 729 609 745 610 C761 611 784 600 790 607 C796 614 793 640 778 650 C763 660 726 661 700 668 C674 675 647 684 620 690 C593 696 563 700 540 702 C517 704 497 697 480 703 C463 709 446 724 440 740 C434 756 452 784 445 800 C438 816 424 829 400 835 C376 841 331 832 300 835 C269 838 237 841 215 850 C193 859 166 880 168 887 C170 894 206 895 225 895 C244 895 266 888 285 887 C304 886 322 888 340 890 C358 892 377 898 395 901 C413 904 434 898 450 905 C466 912 478 928 490 940 C502 952 508 965 520 975 C532 985 542 993 560 1000 C578 1007 609 1014 629 1019 C649 1024 663 1030 680 1033 C697 1036 714 1036 731 1037 C748 1038 768 1040 785 1038 C802 1036 820 1021 834 1026 C848 1031 871 1054 872 1070 C873 1086 854 1106 840 1120 C826 1134 806 1142 790 1152 C774 1162 756 1167 745 1180 C734 1193 732 1213 725 1230 C718 1247 717 1261 705 1280 C693 1299 672 1334 655 1345 C638 1356 616 1347 600 1345 C584 1343 576 1335 562 1335 C548 1335 530 1345 515 1345 C500 1345 486 1338 472 1336 C458 1334 444 1331 430 1330 C416 1329 393 1328 386 1328" stroke="#2c146b" strokeOpacity=".38" strokeWidth="13" strokeDasharray="11 25" transform="translate(0 3)"/><path d="M150 455 C159 454 182 452 205 452 C228 452 262 453 285 455 C308 457 322 459 340 462 C358 465 378 467 395 472 C412 477 427 479 440 490 C453 501 466 522 472 540 C478 558 468 586 478 600 C488 614 512 624 530 625 C548 626 570 615 585 605 C600 595 608 570 620 567 C632 564 648 579 660 585 C672 591 681 598 695 602 C709 606 729 609 745 610 C761 611 784 600 790 607 C796 614 793 640 778 650 C763 660 726 661 700 668 C674 675 647 684 620 690 C593 696 563 700 540 702 C517 704 497 697 480 703 C463 709 446 724 440 740 C434 756 452 784 445 800 C438 816 424 829 400 835 C376 841 331 832 300 835 C269 838 237 841 215 850 C193 859 166 880 168 887 C170 894 206 895 225 895 C244 895 266 888 285 887 C304 886 322 888 340 890 C358 892 377 898 395 901 C413 904 434 898 450 905 C466 912 478 928 490 940 C502 952 508 965 520 975 C532 985 542 993 560 1000 C578 1007 609 1014 629 1019 C649 1024 663 1030 680 1033 C697 1036 714 1036 731 1037 C748 1038 768 1040 785 1038 C802 1036 820 1021 834 1026 C848 1031 871 1054 872 1070 C873 1086 854 1106 840 1120 C826 1134 806 1142 790 1152 C774 1162 756 1167 745 1180 C734 1193 732 1213 725 1230 C718 1247 717 1261 705 1280 C693 1299 672 1334 655 1345 C638 1356 616 1347 600 1345 C584 1343 576 1335 562 1335 C548 1335 530 1345 515 1345 C500 1345 486 1338 472 1336 C458 1334 444 1331 430 1330 C416 1329 393 1328 386 1328" stroke="#ffffff" strokeWidth="10" strokeDasharray="11 25"/></g></svg>
         <button className="bt" style={{ position: 'absolute', ...a(3.2, 17.2, 7.6, 7.6) }} onClick={() => ke('beranda')} aria-label="Kembali"><Panah /></button>
-        <img src={GAMBAR_BANNER} alt="Peta Petualangan - Jelajahi Dunia, Temukan Bentuknya!" draggable={false} style={{ position: 'absolute', ...m(131, 71, 232, 66), pointerEvents: 'none', filter: 'drop-shadow(0 .8cqw 1cqw rgba(18,60,120,.28))' }} />
+        <img src={GAMBAR_BANNER} alt="Peta Petualangan - Jelajahi Dunia, Temukan Bentuknya!" draggable={false} style={{ position: 'absolute', ...m(131, 71, 232, 66), pointerEvents: 'none', filter: 'drop-shadow(0 .8cqw 1cqw rgba(41,18,120,.28))' }} />
         <button style={{ position: 'absolute', background: 'none', borderRadius: '50%', ...m(58, 218, 44, 44) }} onClick={() => g.mulaiLevel(1)} aria-label="Level 1" />
         {/* level 2 & 3 di pulau pertama: lencana biru muncul setelah level sebelumnya lolos (bintang ≥ 2) */}
         {([[2, 126, 216], [3, 185, 226]] as [number, number, number][]).map(([n, x, y]) => g.terbuka(n) && (
@@ -2279,8 +2304,8 @@ function Alur({ layar, ke, g }: { layar: string; ke: Ke; g: Konteks }) {
           <div key={n} className="nl" aria-label={'Level ' + n + ' terkunci'} style={{ left: (x - d / 2) / 9.41 + 'cqw', top: (y - d / 2 - (d > 70 ? 6 : 0)) / 9.41 + 'cqw', width: d / 9.41 + 'cqw', height: d / 9.41 + 'cqw' }}><Gm /><span>{n}</span></div>
         ))}
         <div className="kartu" style={{ position: 'absolute', ...m(12, 709, 139, 60), display: 'flex', alignItems: 'center', gap: '2cqw', padding: '0 2cqw', borderRadius: '3cqw' }}>
-          <svg viewBox="0 0 40 36" style={{ width: '9cqw' }}><rect x="3" y="14" width="34" height="20" rx="3" fill="#2f8cf0" stroke="#12378a" strokeWidth="2" /><path d="M3 18 Q20 -4 37 18Z" fill="#4aa0ff" stroke="#12378a" strokeWidth="2" /><rect x="16" y="18" width="8" height="8" rx="2" fill="#ffc72a" /></svg>
-          <div style={{ flex: 1, fontSize: '2.4cqw', lineHeight: 1.2 }}><b>Koleksi Bentuk</b><div style={{ height: '1.6cqw', background: '#d4e2f3', borderRadius: '1cqw', margin: '.6cqw 0' }}><i style={{ display: 'block', width: '33%', height: '100%', background: '#54c93a', borderRadius: '1cqw' }} /></div>8/24</div>
+          <svg viewBox="0 0 40 36" style={{ width: '9cqw' }}><rect x="3" y="14" width="34" height="20" rx="3" fill="#4c2ff0" stroke="#39128a" strokeWidth="2" /><path d="M3 18 Q20 -4 37 18Z" fill="#674aff" stroke="#39128a" strokeWidth="2" /><rect x="16" y="18" width="8" height="8" rx="2" fill="#ffc72a" /></svg>
+          <div style={{ flex: 1, fontSize: '2.4cqw', lineHeight: 1.2 }}><b>Koleksi Bentuk</b><div style={{ height: '1.6cqw', background: '#dad4f3', borderRadius: '1cqw', margin: '.6cqw 0' }}><i style={{ display: 'block', width: '33%', height: '100%', background: '#54c93a', borderRadius: '1cqw' }} /></div>8/24</div>
         </div>
       </>
     )
@@ -2364,9 +2389,9 @@ function App() {
         <div className={layar === 'peta' ? 'profil panel-gelap profil-mini' : 'profil panel-gelap'}>
           <svg className="avatar" viewBox="0 0 48 48" aria-hidden="true">
             <circle cx="24" cy="24" r="24" fill="#7fd6a6" />
-            <path d="M6 46 Q24 28 42 46Z" fill="#2f6fd6" />
+            <path d="M6 46 Q24 28 42 46Z" fill="#592fd6" />
             <circle cx="24" cy="25" r="12" fill="#ffd2a6" />
-            <path d="M11 25 Q9 7 24 7 Q39 7 37 25 Q33 14 24 15.5 Q15 14 11 25Z" fill="#14141f" />
+            <path d="M11 25 Q9 7 24 7 Q39 7 37 25 Q33 14 24 15.5 Q15 14 11 25Z" fill="#1b141f" />
             <ellipse cx="19.5" cy="26" rx="1.7" ry="2.1" fill="#222" />
             <ellipse cx="28.5" cy="26" rx="1.7" ry="2.1" fill="#222" />
             <circle cx="16" cy="30" r="2.2" fill="#ff9d8a" opacity=".6" />
@@ -2393,9 +2418,9 @@ function App() {
  
         <div className="mata-uang panel-gelap">
           <svg viewBox="0 0 24 24" className="koin" aria-hidden="true">
-            <defs><linearGradient id="gPermata" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#7be4ff" /><stop offset="1" stopColor="#1ea0e6" /></linearGradient></defs>
-            <path d="M7 3 H17 L22 9 L12 22 L2 9Z" fill="url(#gPermata)" stroke="#1473b8" strokeWidth="1.4" strokeLinejoin="round" />
-            <path d="M2 9 H22 M9 3 L12 9 L15 3 M12 9 V22 M7 3 L9 9 L12 22 M17 3 L15 9 L12 22" stroke="#d6f6ff" strokeWidth=".9" fill="none" opacity=".8" strokeLinejoin="round" />
+            <defs><linearGradient id="gPermata" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#7b90ff" /><stop offset="1" stopColor="#1e21e6" /></linearGradient></defs>
+            <path d="M7 3 H17 L22 9 L12 22 L2 9Z" fill="url(#gPermata)" stroke="#1d14b8" strokeWidth="1.4" strokeLinejoin="round" />
+            <path d="M2 9 H22 M9 3 L12 9 L15 3 M12 9 V22 M7 3 L9 9 L12 22 M17 3 L15 9 L12 22" stroke="#d6dcff" strokeWidth=".9" fill="none" opacity=".8" strokeLinejoin="round" />
           </svg>
           <b>45</b>
           <button className="tambah" aria-label="Tambah permata" />
@@ -2419,10 +2444,10 @@ function App() {
  
       {(<button className={layar === 'peta' ? 'misi misi-mini' : 'misi'}>
         <svg className="misi-ikon" viewBox="0 0 32 40" aria-hidden="true">
-          <rect x="2" y="6" width="28" height="32" rx="5" fill="#3d8ff0" stroke="#1e68c2" strokeWidth="1.5" />
-          <rect x="6" y="11" width="20" height="23" rx="2.5" fill="#eaf4ff" />
+          <rect x="2" y="6" width="28" height="32" rx="5" fill="#5c3df0" stroke="#3c1ec2" strokeWidth="1.5" />
+          <rect x="6" y="11" width="20" height="23" rx="2.5" fill="#edeaff" />
           <rect x="10" y="2" width="12" height="7" rx="2.5" fill="#f4b73a" stroke="#c98a14" strokeWidth="1.2" />
-          <path d="M9 17 H23 M9 22 H23 M9 27 H20" stroke="#3d8ff0" strokeWidth="2.4" strokeLinecap="round" />
+          <path d="M9 17 H23 M9 22 H23 M9 27 H20" stroke="#5c3df0" strokeWidth="2.4" strokeLinecap="round" />
         </svg>
         <div className="misi-teks">
           <b>Misi Hari Ini</b>
@@ -2433,7 +2458,7 @@ function App() {
           </div>
         </div>
         <svg className="panah" viewBox="0 0 10 14" aria-hidden="true">
-          <path d="M2 2 L8 7 L2 12" stroke="#2d4f8c" strokeWidth="2.4" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+          <path d="M2 2 L8 7 L2 12" stroke="#472d8c" strokeWidth="2.4" fill="none" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       </button>)}
       </>)}
